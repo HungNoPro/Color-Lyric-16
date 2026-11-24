@@ -1,0 +1,41 @@
+# IDE and local configuration
+/.idea/
+*.iml
+local.properties
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Local work notes
+/TODO.md
+
+# Build outputs and local test evidence
+.gradle/
+.kotlin/
+build/
+.externalNativeBuild/
+.cxx/
+/captures/
+*.log
+*.hprof
+*.apk
+*.apks
+*.aab
+*.idsig
+TerraMoor-settings*.json
+
+# Signing keys and credentials
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pkcs12
+*.pk8
+*.key
+*.pem
+keystore.properties
+signing.properties
+credentials.*
+*-credentials.*
+*_credentials.*

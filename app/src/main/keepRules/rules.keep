@@ -1,0 +1,6 @@
+# LSPosed loads this entry by name from META-INF/xposed/java_init.list.
+-keep class shop.terramoor.github.io.systemui.TerraMoorModule {
+    public <init>();
+    public void onModuleLoaded(io.github.libxposed.api.XposedModuleInterface$ModuleLoadedParam);
+    public void onPackageReady(io.github.libxposed.api.XposedModuleInterface$PackageReadyParam);
+}
