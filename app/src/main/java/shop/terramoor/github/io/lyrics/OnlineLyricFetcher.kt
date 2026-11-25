@@ -34,10 +34,11 @@ internal object OnlineLyricFetcher {
         sourceMode: String = "AUTO",
     ): FetchedPayload? {
         if (sourceMode == "EXTERNAL_ONLY") return null
-        val cleanTitle = sanitizeTrackTitle(title)
+        val rawTitle = title.trim()
+        val cleanTitle = sanitizeTrackTitle(rawTitle)
         if (cleanTitle.isEmpty()) return null
-        val cleanArtist = artist?.trim().orEmpty()
-        val cacheKey = sha256("lyrics_v2|$sourceMode|$cleanTitle|$cleanArtist|${durationMs / 1000}")
+        val rawArtist = artist?.trim().orEmpty()
+        val cacheKey = sha256("lyrics_v3|$sourceMode|$cleanTitle|$rawArtist|${durationMs / 1000}")
         readCache(context, cacheKey)?.let { cached ->
             val obj = try { JSONObject(cached) } catch (_: Exception) { null }
             if (obj != null && obj.has("payload")) {
@@ -46,11 +47,11 @@ internal object OnlineLyricFetcher {
         }
 
         val wordSyncFirst = listOf<Pair<String, () -> FetchedPayload?>>(
-            "APPLE_MUSIC" to { tryAppleMusic(cleanTitle, cleanArtist) },
-            "BETTER_LYRICS" to { tryBetterLyrics(cleanTitle, cleanArtist) },
-            "LRCLIB" to { tryLrclib(cleanTitle, cleanArtist, durationMs) },
-            "KUGOU" to { tryKugou(cleanTitle, cleanArtist, durationMs) },
-            "LYRICS_OVH" to { tryLyricsOvh(cleanTitle, cleanArtist, durationMs) },
+            "APPLE_MUSIC" to { tryAppleMusic(rawTitle, cleanTitle, rawArtist) },
+            "BETTER_LYRICS" to { tryBetterLyrics(rawTitle, cleanTitle, rawArtist) },
+            "LRCLIB" to { tryLrclib(rawTitle, cleanTitle, rawArtist, durationMs) },
+            "KUGOU" to { tryKugou(rawTitle, cleanTitle, rawArtist, durationMs) },
+            "LYRICS_OVH" to { tryLyricsOvh(rawTitle, cleanTitle, rawArtist, durationMs) },
         )
         val ordered = if (sourceMode == "AUTO") {
             wordSyncFirst
@@ -169,83 +170,94 @@ internal object OnlineLyricFetcher {
         return result
     }
 
-    // 0. Apple Music (iTunes track lookup + Paxsenix Apple Music TTML word-by-word)
-    private fun tryAppleMusic(title: String, artist: String): FetchedPayload? {
+    // 0. Apple Music (iTunes track lookup + Paxsenix TTML/syllables, fallback to Apple Music TTML mirror)
+    private fun tryAppleMusic(rawTitle: String, cleanTitle: String, artist: String): FetchedPayload? {
         return try {
-            val term = if (artist.isNotBlank()) "$title $artist" else title
+            val primaryArtist = primaryArtistName(artist)
+            val term = if (primaryArtist.isNotBlank()) "$cleanTitle $primaryArtist" else cleanTitle
             val searchUrl = "https://itunes.apple.com/search?term=${enc(term)}&entity=song&limit=5"
-            val searchBody = httpGet(searchUrl) ?: return null
-            val results = JSONObject(searchBody).optJSONArray("results") ?: return null
-            if (results.length() == 0) return null
-
+            val searchBody = httpGet(searchUrl)
+            val results = searchBody?.let { JSONObject(it).optJSONArray("results") }
             var trackId: Long? = null
-            for (i in 0 until results.length()) {
-                val item = results.optJSONObject(i) ?: continue
-                val id = item.optLong("trackId", 0L)
-                if (id <= 0L) continue
-                val tName = item.optString("trackName")
-                val aName = item.optString("artistName")
-                if (trackId == null) trackId = id
-                if (tName.contains(title, ignoreCase = true) &&
-                    (artist.isBlank() || aName.contains(artist, ignoreCase = true))) {
-                    trackId = id
-                    break
+            if (results != null) {
+                for (i in 0 until results.length()) {
+                    val item = results.optJSONObject(i) ?: continue
+                    val id = item.optLong("trackId", 0L)
+                    if (id <= 0L) continue
+                    val tName = item.optString("trackName")
+                    val aName = item.optString("artistName")
+                    if (trackId == null) trackId = id
+                    if (tName.contains(cleanTitle, ignoreCase = true) &&
+                        (primaryArtist.isBlank() || aName.contains(primaryArtist, ignoreCase = true))) {
+                        trackId = id
+                        break
+                    }
                 }
             }
-            val resolvedId = trackId ?: return null
-            val lyricBody = httpGet("https://lyrics.paxsenix.org/apple-music/lyrics?id=$resolvedId") ?: return null
-            val obj = JSONObject(lyricBody)
-            val ttml = obj.optString("ttml").takeIf { it.isNotBlank() }
-                ?: obj.optString("ttmlContent").takeIf { it.isNotBlank() }
-            if (ttml != null) {
-                val lrc = ttmlToBasicLrc(ttml)
-                if (lrc.isNotBlank()) {
-                    val payload = JSONObject()
-                        .put("songName", title)
-                        .put("artist", artist)
-                        .put("lyric", lrc)
-                        .put("ttml", ttml)
-                        .toString()
-                    Log.i(TAG, "Fetched TTML word-sync lyrics from Apple Music (id=$resolvedId)")
-                    return FetchedPayload("apple-music", payload)
+            if (trackId != null) {
+                val lyricBody = httpGet("https://lyrics.paxsenix.org/apple-music/lyrics?id=$trackId")
+                if (lyricBody != null) {
+                    val obj = JSONObject(lyricBody)
+                    val ttml = obj.optString("ttml").takeIf { it.isNotBlank() }
+                        ?: obj.optString("ttmlContent").takeIf { it.isNotBlank() }
+                    if (ttml != null) {
+                        val lrc = ttmlToEnhancedLrc(ttml)
+                        if (lrc.isNotBlank()) {
+                            val payload = JSONObject()
+                                .put("songName", rawTitle)
+                                .put("artist", artist)
+                                .put("lyric", lrc)
+                                .put("ttml", ttml)
+                                .toString()
+                            Log.i(TAG, "Fetched TTML word-sync lyrics from Apple Music (id=$trackId)")
+                            return FetchedPayload("apple-music", payload)
+                        }
+                    }
+                    val contentArr = obj.optJSONArray("content")
+                    if (contentArr != null && contentArr.length() > 0) {
+                        val elrcFromContent = paxsenixContentToEnhancedLrc(contentArr)
+                        if (elrcFromContent.isNotBlank()) {
+                            Log.i(TAG, "Fetched word-sync JSON lyrics from Apple Music (id=$trackId)")
+                            return FetchedPayload("apple-music", buildLrcPayload(rawTitle, artist, elrcFromContent, 0L))
+                        }
+                    }
+                    val elrc = obj.optString("elrc").takeIf { it.isNotBlank() }
+                        ?: obj.optString("lrc").takeIf { it.isNotBlank() }
+                    if (elrc != null) {
+                        Log.i(TAG, "Fetched LRC lyrics from Apple Music (id=$trackId)")
+                        return FetchedPayload("apple-music", buildLrcPayload(rawTitle, artist, elrc, 0L))
+                    }
                 }
             }
-            val contentArr = obj.optJSONArray("content")
-            if (contentArr != null && contentArr.length() > 0) {
-                val elrcFromContent = paxsenixContentToEnhancedLrc(contentArr)
-                if (elrcFromContent.isNotBlank()) {
-                    Log.i(TAG, "Fetched word-sync JSON lyrics from Apple Music (id=$resolvedId)")
-                    return FetchedPayload("apple-music", buildLrcPayload(title, artist, elrcFromContent))
-                }
-            }
-            val elrc = obj.optString("elrc").takeIf { it.isNotBlank() }
-                ?: obj.optString("lrc").takeIf { it.isNotBlank() }
-                ?: return null
-            Log.i(TAG, "Fetched LRC lyrics from Apple Music (id=$resolvedId)")
-            FetchedPayload("apple-music", buildLrcPayload(title, artist, elrc))
+            null
         } catch (e: Exception) {
             Log.w(TAG, "Apple Music failed: ${e.message}")
             null
         }
     }
 
-    // 1. Better Lyrics (TTML / synced)
-    private fun tryBetterLyrics(title: String, artist: String): FetchedPayload? {
+    // 1. Better Lyrics (Apple Music TTML word-by-word)
+    private fun tryBetterLyrics(rawTitle: String, cleanTitle: String, artist: String): FetchedPayload? {
         return try {
-            val url = "https://lyrics-api.boidu.dev/getLyrics?s=${enc(title)}&a=${enc(artist)}"
-            val body = httpGet(url) ?: return null
-            val json = JSONObject(body)
-            val ttml = json.optString("ttml").takeIf { it.isNotBlank() } ?: return null
-            val lrc = ttmlToBasicLrc(ttml)
-            if (lrc.isBlank()) return null
-            val payload = JSONObject()
-                .put("songName", title)
-                .put("artist", artist)
-                .put("lyric", lrc)
-                .put("ttml", ttml)
-                .toString()
-            Log.i(TAG, "Fetched lyrics from Better Lyrics (${lrc.length} chars)")
-            FetchedPayload("better-lyrics", payload)
+            val primaryArtist = primaryArtistName(artist)
+            val candidates = listOf(artist, primaryArtist).distinct().filter { it.isNotBlank() } + listOf("")
+            for (candArtist in candidates) {
+                val url = "https://lyrics-api.boidu.dev/getLyrics?s=${enc(cleanTitle)}&a=${enc(candArtist)}"
+                val body = httpGet(url) ?: continue
+                val json = JSONObject(body)
+                val ttml = json.optString("ttml").takeIf { it.isNotBlank() } ?: continue
+                val lrc = ttmlToEnhancedLrc(ttml)
+                if (lrc.isBlank()) continue
+                val payload = JSONObject()
+                    .put("songName", rawTitle)
+                    .put("artist", artist)
+                    .put("lyric", lrc)
+                    .put("ttml", ttml)
+                    .toString()
+                Log.i(TAG, "Fetched TTML word-sync lyrics from Better Lyrics (${lrc.length} chars)")
+                return FetchedPayload("better-lyrics", payload)
+            }
+            null
         } catch (e: Exception) {
             Log.w(TAG, "Better Lyrics failed: ${e.message}")
             null
@@ -253,16 +265,16 @@ internal object OnlineLyricFetcher {
     }
 
     // 2. LRCLIB (synced LRC)
-    private fun tryLrclib(title: String, artist: String, durationMs: Long): FetchedPayload? {
+    private fun tryLrclib(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
         try {
-            val sb = StringBuilder("https://lrclib.net/api/get?track_name=${enc(title)}")
+            val sb = StringBuilder("https://lrclib.net/api/get?track_name=${enc(cleanTitle)}")
             if (artist.isNotBlank()) sb.append("&artist_name=${enc(artist)}")
             if (durationMs > 0L) sb.append("&duration=${durationMs / 1000}")
             httpGet(sb.toString())?.let { body ->
                 val json = JSONObject(body)
                 val synced = json.optString("syncedLyrics").takeIf { it.isNotBlank() }
                 if (synced != null) {
-                    val payload = buildLrcPayload(title, artist, synced)
+                    val payload = buildLrcPayload(rawTitle, artist, synced, durationMs)
                     Log.i(TAG, "Fetched synced lyrics from LRCLIB /get")
                     return FetchedPayload("lrclib", payload)
                 }
@@ -272,7 +284,7 @@ internal object OnlineLyricFetcher {
         }
 
         return try {
-            val q = if (artist.isNotBlank()) "$title $artist" else title
+            val q = if (artist.isNotBlank()) "$cleanTitle $artist" else cleanTitle
             val body = httpGet("https://lrclib.net/api/search?q=${enc(q)}") ?: return null
             val arr = JSONArray(body)
             var bestSynced: String? = null
@@ -290,7 +302,7 @@ internal object OnlineLyricFetcher {
             }
             val lrc = bestSynced ?: bestPlain?.let { plainToSyntheticLrc(it, durationMs) } ?: return null
             Log.i(TAG, "Fetched lyrics from LRCLIB /search (synced=${bestSynced != null})")
-            FetchedPayload("lrclib", buildLrcPayload(title, artist, lrc))
+            FetchedPayload("lrclib", buildLrcPayload(rawTitle, artist, lrc, durationMs))
         } catch (e: Exception) {
             Log.w(TAG, "LRCLIB /search failed: ${e.message}")
             null
@@ -298,9 +310,9 @@ internal object OnlineLyricFetcher {
     }
 
     // 3. Kugou
-    private fun tryKugou(title: String, artist: String, durationMs: Long): FetchedPayload? {
+    private fun tryKugou(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
         return try {
-            val kw = if (artist.isNotBlank()) "$title-$artist" else title
+            val kw = if (artist.isNotBlank()) "$cleanTitle-$artist" else cleanTitle
             val dur = if (durationMs > 0L) durationMs else 240_000L
             val searchUrl = "https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=${enc(kw)}&duration=$dur"
             val searchBody = httpGet(searchUrl) ?: return null
@@ -319,7 +331,7 @@ internal object OnlineLyricFetcher {
                 .removePrefix("\uFEFF")
             if (lrc.isBlank()) return null
             Log.i(TAG, "Fetched lyrics from Kugou (${lrc.length} chars)")
-            FetchedPayload("kugou", buildLrcPayload(title, artist, lrc))
+            FetchedPayload("kugou", buildLrcPayload(rawTitle, artist, lrc, durationMs))
         } catch (e: Exception) {
             Log.w(TAG, "Kugou failed: ${e.message}")
             null
@@ -327,16 +339,16 @@ internal object OnlineLyricFetcher {
     }
 
     // 4. lyrics.ovh (plain text fallback)
-    private fun tryLyricsOvh(title: String, artist: String, durationMs: Long): FetchedPayload? {
+    private fun tryLyricsOvh(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
         if (artist.isBlank()) return null
         return try {
-            val url = "https://api.lyrics.ovh/v1/${encPath(artist)}/${encPath(title)}"
+            val url = "https://api.lyrics.ovh/v1/${encPath(artist)}/${encPath(cleanTitle)}"
             val body = httpGet(url) ?: return null
             val plain = JSONObject(body).optString("lyrics").takeIf { it.isNotBlank() } ?: return null
             val lrc = plainToSyntheticLrc(plain, durationMs)
             if (lrc.isBlank()) return null
             Log.i(TAG, "Fetched plain lyrics from lyrics.ovh")
-            FetchedPayload("lyrics.ovh", buildLrcPayload(title, artist, lrc))
+            FetchedPayload("lyrics.ovh", buildLrcPayload(rawTitle, artist, lrc, durationMs))
         } catch (e: Exception) {
             Log.w(TAG, "lyrics.ovh failed: ${e.message}")
             null
@@ -413,20 +425,72 @@ internal object OnlineLyricFetcher {
         return out.toString()
     }
 
-    private fun ttmlToBasicLrc(ttml: String): String {
-        val pRegex = Regex("""<p\b[^>]*\bbegin="([^"]+)"[^>]*>(.*?)</p>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+    private fun ttmlToEnhancedLrc(ttml: String): String {
+        val pRegex = Regex(
+            """<p\b([^>]*)>(.*?)</p>""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        )
+        val beginAttr = Regex("""\bbegin="([^"]+)"""", RegexOption.IGNORE_CASE)
+        val endAttr = Regex("""\bend="([^"]+)"""", RegexOption.IGNORE_CASE)
         val auxSpanRegex = Regex(
             """<span\b[^>]*\b(?:[a-zA-Z0-9_-]+:)?role="(?:x-bg|x-translation|x-roman|translation|romanization|background)"[^>]*>.*?</span>""",
             setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
         )
+        val spanRegex = Regex(
+            """<span\b([^>]*)>(.*?)</span>""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        )
         val tagRegex = Regex("""<[^>]+>""")
         val out = StringBuilder()
+
         for (match in pRegex.findAll(ttml)) {
-            val ms = parseTtmlTimeMs(match.groupValues[1]) ?: continue
-            val strippedAux = auxSpanRegex.replace(match.groupValues[2], "")
-            val text = decodeXmlEntities(tagRegex.replace(strippedAux, "")).replace(Regex("\\s+"), " ").trim()
-            if (text.isEmpty()) continue
-            out.append(formatLrcTime(ms)).append(text).append('\n')
+            val pAttrs = match.groupValues[1]
+            val pStart = beginAttr.find(pAttrs)?.groupValues?.get(1)?.let(::parseTtmlTimeMs) ?: continue
+            val pEnd = endAttr.find(pAttrs)?.groupValues?.get(1)?.let(::parseTtmlTimeMs)
+            val inner = auxSpanRegex.replace(match.groupValues[2], "")
+
+            // Extract word-level <span begin="..." end="..."> directly into Enhanced LRC
+            val spanMatches = spanRegex.findAll(inner).toList()
+            val row = StringBuilder()
+            var wordCount = 0
+            var lastWordEnd = pStart
+            if (spanMatches.isNotEmpty()) {
+                var cursor = 0
+                for (sm in spanMatches) {
+                    val gap = decodeXmlEntities(tagRegex.replace(inner.substring(cursor, sm.range.first), ""))
+                    if (gap.isNotEmpty() && wordCount > 0) {
+                        row.append(if (gap.all { it.isWhitespace() }) " " else gap)
+                    }
+                    cursor = sm.range.last + 1
+                    val sAttrs = sm.groupValues[1]
+                    val sStart = beginAttr.find(sAttrs)?.groupValues?.get(1)?.let(::parseTtmlTimeMs)
+                    val sEnd = endAttr.find(sAttrs)?.groupValues?.get(1)?.let(::parseTtmlTimeMs)
+                    val sText = decodeXmlEntities(tagRegex.replace(sm.groupValues[2], ""))
+                    if (sText.isNotEmpty()) {
+                        if (sStart != null) {
+                            val clampedStart = maxOf(pStart, sStart)
+                            row.append(formatAngleTime(clampedStart)).append(sText)
+                            wordCount++
+                            if (sEnd != null && sEnd > lastWordEnd) lastWordEnd = sEnd
+                        } else {
+                            row.append(sText)
+                        }
+                    }
+                }
+                val tail = decodeXmlEntities(tagRegex.replace(inner.substring(cursor), "")).trimEnd()
+                if (tail.isNotEmpty()) row.append(tail)
+            }
+
+            if (wordCount > 0) {
+                val finalEnd = maxOf(pEnd ?: 0L, lastWordEnd)
+                out.append(formatLrcTime(pStart)).append(row.toString().trim())
+                if (finalEnd > pStart) out.append(formatAngleTime(finalEnd))
+                out.append('\n')
+            } else {
+                val text = decodeXmlEntities(tagRegex.replace(inner, "")).replace(Regex("\\s+"), " ").trim()
+                if (text.isEmpty()) continue
+                out.append(formatLrcTime(pStart)).append(text).append('\n')
+            }
         }
         return out.toString()
     }
@@ -489,12 +553,85 @@ internal object OnlineLyricFetcher {
         .replace("&apos;", "'")
         .replace("&#39;", "'")
 
-    private fun buildLrcPayload(title: String, artist: String, lrc: String): String =
-        JSONObject()
+    private fun buildLrcPayload(title: String, artist: String, lrc: String, durationMs: Long): String {
+        val enhanced = if (lrc.contains(Regex("""<\d{1,4}:\d{2}(?:[.:]\d{1,3})?>"""))) lrc
+            else synthesizeWordTimingLrc(lrc, durationMs)
+        return JSONObject()
             .put("songName", title)
             .put("artist", artist)
-            .put("lyric", lrc)
+            .put("lyric", enhanced)
             .toString()
+    }
+
+    /** Estimates per-word timestamps for line-synced LRC so word-by-word highlight works on all sources. */
+    private fun synthesizeWordTimingLrc(lrc: String, durationMs: Long): String {
+        val lineTagRegex = Regex("""^((?:\[\d{1,4}:\d{2}(?:[.:]\d{1,3})?])+)(.*)$""")
+        val singleTagRegex = Regex("""\[(\d{1,4}):(\d{2})(?:[.:](\d{1,3}))?]""")
+        data class Entry(val startMs: Long, val text: String)
+        val entries = ArrayList<Entry>()
+        for (rawLine in lrc.lineSequence()) {
+            val trimmed = rawLine.trim()
+            val m = lineTagRegex.matchEntire(trimmed) ?: continue
+            val text = m.groupValues[2].trim()
+            for (tag in singleTagRegex.findAll(m.groupValues[1])) {
+                val min = tag.groupValues[1].toLongOrNull() ?: continue
+                val sec = tag.groupValues[2].toLongOrNull() ?: continue
+                if (sec >= 60L) continue
+                val ms = tag.groupValues[3].padEnd(3, '0').toLongOrNull() ?: 0L
+                entries += Entry((min * 60L + sec) * 1000L + ms, text)
+            }
+        }
+        if (entries.isEmpty()) return lrc
+        entries.sortBy { it.startMs }
+        val wordTokenRegex = Regex("""\S+\s*""")
+        val out = StringBuilder()
+        for (i in entries.indices) {
+            val e = entries[i]
+            if (e.text.isEmpty()) {
+                out.append(formatLrcTime(e.startMs)).append('\n')
+                continue
+            }
+            val nextStart = entries.getOrNull(i + 1)?.startMs
+            val fallbackDur = (e.text.length * 140L).coerceIn(1_800L, 6_500L)
+            val rawSpan = when {
+                nextStart != null && nextStart > e.startMs -> nextStart - e.startMs
+                durationMs > e.startMs -> (durationMs - e.startMs).coerceAtMost(fallbackDur)
+                else -> fallbackDur
+            }
+            val maxReasonable = (e.text.length * 220L).coerceIn(2_500L, 8_500L)
+            val span = rawSpan.coerceAtMost(maxReasonable).coerceAtLeast(350L)
+
+            val tokens = wordTokenRegex.findAll(e.text).map { it.value }.toList().let { words ->
+                // For CJK lines without spaces, split into individual characters
+                if (words.size == 1 && e.text.length >= 3 && e.text.any { it.code > 0x2E80 }) {
+                    e.text.map { it.toString() }
+                } else words
+            }
+            if (tokens.size <= 1) {
+                out.append(formatLrcTime(e.startMs))
+                    .append(formatAngleTime(e.startMs)).append(e.text)
+                    .append(formatAngleTime(e.startMs + span)).append('\n')
+                continue
+            }
+            val totalWeight = tokens.sumOf { it.trim().length.coerceAtLeast(1) }.toDouble()
+            var acc = 0.0
+            out.append(formatLrcTime(e.startMs))
+            for (tok in tokens) {
+                val wStart = e.startMs + (span * (acc / totalWeight)).toLong()
+                out.append(formatAngleTime(wStart)).append(tok)
+                acc += tok.trim().length.coerceAtLeast(1)
+            }
+            out.append(formatAngleTime(e.startMs + span)).append('\n')
+        }
+        return out.toString()
+    }
+
+    private fun primaryArtistName(artist: String): String {
+        val trimmed = artist.trim()
+        if (trimmed.isEmpty()) return ""
+        return trimmed.split(Regex("""\s*(?:,|&|feat\.|ft\.| x |×|/)\s*""", RegexOption.IGNORE_CASE))
+            .firstOrNull()?.trim().orEmpty()
+    }
 
     private fun looksVietnamese(lines: List<String>): Boolean {
         val sample = lines.take(12).joinToString(" ")

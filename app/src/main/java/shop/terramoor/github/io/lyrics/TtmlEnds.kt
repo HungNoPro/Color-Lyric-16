@@ -19,12 +19,21 @@ internal object TtmlEnds {
                 if (event == XmlPullParser.START_TAG) {
                     require(parser.depth <= 64)
                     val parent = inheritedStarts.last()
-                    val explicitStart = timestamp(parser.getAttributeValue(null, "begin"))
-                    val start = parent + (explicitStart ?: 0L)
+                    val rawBegin = parser.getAttributeValue(null, "begin")
+                    val explicitStart = timestamp(rawBegin)
+                    val start = when {
+                        explicitStart == null -> parent
+                        rawBegin?.contains(':') == true || parent <= 0L || explicitStart >= parent -> explicitStart
+                        else -> parent + explicitStart
+                    }
                     inheritedStarts.add(start)
                     if (parser.name == "p" && explicitStart != null) {
-                        val end = timestamp(parser.getAttributeValue(null, "end"))?.plus(parent)
-                            ?: timestamp(parser.getAttributeValue(null, "dur"))?.plus(start)
+                        val rawEnd = parser.getAttributeValue(null, "end")
+                        val parsedEnd = timestamp(rawEnd)
+                        val end = when {
+                            parsedEnd != null -> if (rawEnd?.contains(':') == true || parent <= 0L || parsedEnd >= start) parsedEnd else parent + parsedEnd
+                            else -> timestamp(parser.getAttributeValue(null, "dur"))?.plus(start)
+                        }
                         if (end != null && end > start) ends.putIfAbsent(start, end)
                     }
                 } else if (event == XmlPullParser.END_TAG) {
