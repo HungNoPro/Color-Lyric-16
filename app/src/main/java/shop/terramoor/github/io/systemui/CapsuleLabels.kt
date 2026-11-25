@@ -23,7 +23,13 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
     private val density = capsule.resources.displayMetrics.density
     private val strip = CapsuleLyricStrip(density)
     private val coverVisibility = NativeSlotVisibility(target.artwork)
+    private val leftSectionVisibility = target.leftSection
+        ?.takeIf { it !== capsule && it !== target.artwork && it !== target.title.frame && it !== target.translation.frame }
+        ?.let(::NativeSlotVisibility)
     private val waveformVisibility = NativeSlotVisibility(target.waveform)
+    private val rightSectionVisibility = target.rightSection
+        ?.takeIf { it !== capsule && it !== target.waveform && it !== target.title.frame && it !== target.translation.frame }
+        ?.let(::NativeSlotVisibility)
     private val titleStockVisibility = target.title.stock
         .takeIf { it !== capsule && it !== target.title.frame && it !== target.artwork && it !== target.waveform }
         ?.let(::NativeSlotVisibility)
@@ -132,7 +138,7 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
         val normalWidth = capsuleWidthPixels(settings[CapsuleTuning.ISLAND_WIDTH], density)
         updateCapsuleWidth(normalWidth)
         setFillerWidth(capsuleWidthPixels(CapsuleTuning.ISLAND_WIDTH.range.last / 2, density))
-        if (capsule.width > 0) alignTrailingSection(capsule.width)
+        if (capsule.width > 0 && viewport.inset == 0) alignTrailingSection(capsule.width)
     }
 
     fun prepareViewport(now: Long, canCompact: Boolean, resumeInterlude: Boolean = false,
@@ -382,7 +388,9 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
     fun enforceNativeVisibility() {
         val settings = displaySettings ?: return
         coverVisibility.apply(!settings.showCover)
+        leftSectionVisibility?.apply(!settings.showCover)
         waveformVisibility.apply(!settings.showWaveform)
+        rightSectionVisibility?.apply(!settings.showWaveform)
         val hideStock = displayLine != null
         titleStockVisibility?.apply(hideStock)
         translationStockVisibility?.apply(hideStock)
@@ -400,7 +408,9 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
         displaySettings = null
         capsule.removeCallbacks(redrawContent)
         coverVisibility.restore()
+        leftSectionVisibility?.restore()
         waveformVisibility.restore()
+        rightSectionVisibility?.restore()
         titleStockVisibility?.restore()
         translationStockVisibility?.restore()
         updateCapsuleWidth(null)

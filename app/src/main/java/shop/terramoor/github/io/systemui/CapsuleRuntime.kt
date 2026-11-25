@@ -105,7 +105,7 @@ internal class CapsuleRuntime(
         }
         val binding = labels
         binding?.enforceNativeVisibility()
-        if (binding != null && !binding.nativeWhilePaused) {
+        if (binding != null && !binding.nativeWhilePaused && !binding.hasInterludeViewport) {
             binding.maintainNativeSizing()
         }
         if (binding != null && (renderedShown != binding.target.capsule.isShown ||
@@ -169,6 +169,8 @@ internal class CapsuleRuntime(
 
     fun shouldPreventCapsuleCollapse(): Boolean {
         if (!settings.enabled || !settings.preventCapsuleCollapse) return false
+        val activeMedia = media ?: return false
+        if (!settings.allowsApp(activeMedia.owner)) return false
         val activeSession = session ?: return false
         if (activeSession.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE) return false
         return true
@@ -384,6 +386,7 @@ internal class CapsuleRuntime(
         if (!settings.enabled) return
         val capsule = instance as? ViewGroup ?: return
         val active = media?.takeUnless { it.token == destroyedToken } ?: return
+        if (!settings.allowsApp(active.owner)) return
         val watch = session ?: return
         if (watch.token != active.token) return
         if (watch.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE) return
@@ -820,6 +823,11 @@ internal class CapsuleRuntime(
             return
         }
         val candidate = media?.takeUnless { it.token == destroyedToken }
+        if (candidate != null && !settings.allowsApp(candidate.owner)) {
+            clearLabels()
+            setStatus("App not in whitelist: ${candidate.owner}")
+            return
+        }
         val target = candidate?.let { active ->
             plugin?.findTarget(currentRoot, active.key, labels?.target) { trace("target", it) }
         }

@@ -143,6 +143,7 @@ class TerraMoorApp : Application(), XposedServiceHelper.OnServiceListener {
             CapsuleSettings.AOD_UNLOCK_WHITELIST -> current.copy(aodUnlockWhitelist = checked)
             CapsuleSettings.PREVENT_CAPSULE_COLLAPSE -> current.copy(preventCapsuleCollapse = checked)
             CapsuleSettings.AUTO_CLEAR_CACHE -> current.copy(autoClearCache = checked)
+            CapsuleSettings.APP_WHITELIST_ENABLED -> current.copy(appWhitelistEnabled = checked)
             else -> return
         }
         save(next) { putBoolean(key, checked) }
@@ -229,6 +230,13 @@ class TerraMoorApp : Application(), XposedServiceHelper.OnServiceListener {
     internal fun setTranslateTargetLang(lang: TranslateTargetLang) {
         save(state.value.settings.copy(translateTargetLang = lang)) {
             putString(CapsuleSettings.TRANSLATE_TARGET_LANG, lang.name)
+        }
+    }
+
+    internal fun setAppWhitelist(packages: Set<String>) {
+        val clean = packages.asSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        save(state.value.settings.copy(appWhitelistPackages = clean)) {
+            putString(CapsuleSettings.APP_WHITELIST_PACKAGES, CapsuleSettings.encodePackageSet(clean))
         }
     }
 

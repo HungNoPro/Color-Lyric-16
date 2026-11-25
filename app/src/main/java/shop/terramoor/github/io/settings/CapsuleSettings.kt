@@ -105,8 +105,13 @@ internal data class CapsuleSettings(
     val aodUnlockWhitelist: Boolean = true,
     val preventCapsuleCollapse: Boolean = true,
     val autoClearCache: Boolean = false,
+    val appWhitelistEnabled: Boolean = false,
+    val appWhitelistPackages: Set<String> = emptySet(),
     private val tuning: Map<CapsuleTuning, Int> = emptyMap(),
 ) {
+
+    fun allowsApp(packageName: String?): Boolean =
+        !appWhitelistEnabled || (packageName != null && packageName in appWhitelistPackages)
 
     fun withTuning(values: Map<CapsuleTuning, Int>): CapsuleSettings = copy(tuning = tuning + values)
 
@@ -162,7 +167,15 @@ internal data class CapsuleSettings(
         const val AOD_UNLOCK_WHITELIST = "aod_unlock_whitelist"
         const val PREVENT_CAPSULE_COLLAPSE = "prevent_capsule_collapse"
         const val AUTO_CLEAR_CACHE = "auto_clear_cache"
+        const val APP_WHITELIST_ENABLED = "app_whitelist_enabled"
+        const val APP_WHITELIST_PACKAGES = "app_whitelist_packages"
         private val DEFAULT_NO_LYRICS_MODE = NoLyricsMode.TRACK
+
+        fun encodePackageSet(packages: Set<String>): String =
+            packages.asSequence().map { it.trim() }.filter { it.isNotEmpty() }.sorted().joinToString("\n")
+
+        fun decodePackageSet(raw: String?): Set<String> =
+            raw.orEmpty().lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
 
         private val defaults = CapsuleSettings()
         fun read(prefs: SharedPreferences): CapsuleSettings {
@@ -197,6 +210,8 @@ internal data class CapsuleSettings(
                 aodUnlockWhitelist = prefs.getBoolean(AOD_UNLOCK_WHITELIST, defaults.aodUnlockWhitelist),
                 preventCapsuleCollapse = prefs.getBoolean(PREVENT_CAPSULE_COLLAPSE, defaults.preventCapsuleCollapse),
                 autoClearCache = prefs.getBoolean(AUTO_CLEAR_CACHE, defaults.autoClearCache),
+                appWhitelistEnabled = prefs.getBoolean(APP_WHITELIST_ENABLED, defaults.appWhitelistEnabled),
+                appWhitelistPackages = decodePackageSet(prefs.getString(APP_WHITELIST_PACKAGES, null)),
                 tuning = CapsuleTuning.entries.associateWith { option ->
                     if (option == CapsuleTuning.TINT_STRENGTH && !prefs.contains(option.key) &&
                         (prefs.contains(LEGACY_FIRST_ROW_TINT) || prefs.contains(LEGACY_SECOND_ROW_TINT))) {

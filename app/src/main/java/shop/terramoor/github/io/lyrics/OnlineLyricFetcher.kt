@@ -12,16 +12,26 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.zip.Inflater
+import kotlin.math.abs
 
 internal object OnlineLyricFetcher {
     private const val TAG = "TerraMoorOnline"
-    private const val CONNECT_TIMEOUT_MS = 4500
-    private const val READ_TIMEOUT_MS = 6000
+    private const val CONNECT_TIMEOUT_MS = 3500
+    private const val READ_TIMEOUT_MS = 4500
+    private const val PARALLEL_BUDGET_MS = 3800L
     private const val USER_AGENT = "ColorLyric-COS16/1.9 (Android)"
+    private val KRC_KEY = intArrayOf(64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105)
+    private val fetchPool = Executors.newCachedThreadPool()
 
     data class FetchedPayload(
         val source: String,
         val payloadJson: String,
+        val isTrueWordSync: Boolean = false,
     )
 
     data class CacheStats(
@@ -38,7 +48,7 @@ internal object OnlineLyricFetcher {
         val cleanTitle = sanitizeTrackTitle(rawTitle)
         if (cleanTitle.isEmpty()) return null
         val rawArtist = artist?.trim().orEmpty()
-        val cacheKey = sha256("lyrics_v4|$sourceMode|$cleanTitle|$rawArtist|${durationMs / 1000}")
+        val cacheKey = sha256("lyrics_v5|$sourceMode|$cleanTitle|$rawArtist|${durationMs / 1000}")
         readCache(context, cacheKey)?.let { cached ->
             val obj = try { JSONObject(cached) } catch (_: Exception) { null }
             if (obj != null && obj.has("payload")) {
@@ -46,21 +56,20 @@ internal object OnlineLyricFetcher {
             }
         }
 
-        val wordSyncFirst = listOf<Pair<String, () -> FetchedPayload?>>(
-            "APPLE_MUSIC" to { tryAppleMusic(rawTitle, cleanTitle, rawArtist, durationMs) },
-            "BETTER_LYRICS" to { tryBetterLyrics(rawTitle, cleanTitle, rawArtist) },
-            "LRCLIB" to { tryLrclib(rawTitle, cleanTitle, rawArtist, durationMs) },
-            "KUGOU" to { tryKugou(rawTitle, cleanTitle, rawArtist, durationMs) },
-            "LYRICS_OVH" to { tryLyricsOvh(rawTitle, cleanTitle, rawArtist, durationMs) },
-        )
-        val ordered = if (sourceMode == "AUTO") {
-            wordSyncFirst
+        val fetched = if (sourceMode == "AUTO") {
+            fetchParallelAuto(rawTitle, cleanTitle, rawArtist, durationMs)
         } else {
+            val wordSyncFirst = listOf<Pair<String, () -> FetchedPayload?>>(
+                "APPLE_MUSIC" to { tryAppleMusic(rawTitle, cleanTitle, rawArtist, durationMs) },
+                "BETTER_LYRICS" to { tryBetterLyrics(rawTitle, cleanTitle, rawArtist, durationMs) },
+                "LRCLIB" to { tryLrclib(rawTitle, cleanTitle, rawArtist, durationMs) },
+                "KUGOU" to { tryKugou(rawTitle, cleanTitle, rawArtist, durationMs) },
+                "LYRICS_OVH" to { tryLyricsOvh(rawTitle, cleanTitle, rawArtist, durationMs) },
+            )
             val preferred = wordSyncFirst.filter { it.first == sourceMode }
             val fallback = wordSyncFirst.filter { it.first != sourceMode }
-            preferred + fallback
+            (preferred + fallback).firstNotNullOfOrNull { it.second() }
         }
-        val fetched = ordered.firstNotNullOfOrNull { it.second() }
 
         if (fetched != null) {
             val wrap = JSONObject()
@@ -170,9 +179,73 @@ internal object OnlineLyricFetcher {
         return result
     }
 
-    // 0. Apple Music word-by-word (LyricsPlus v2 primary -> iTunes + Paxsenix fallback)
+    /**
+     * Queries all primary word-synced and line-synced sources concurrently (inspired by Square's
+     * LyricsLibrary) and returns immediately as soon as the highest-priority true word-sync answer
+     * arrives, falling back to the best synced line result within [PARALLEL_BUDGET_MS].
+     */
+    private fun fetchParallelAuto(
+        rawTitle: String, cleanTitle: String, artist: String, durationMs: Long,
+    ): FetchedPayload? {
+        val tasks = listOf<Pair<String, () -> FetchedPayload?>>(
+            "lyricsplus" to { tryLyricsPlus(rawTitle, cleanTitle, artist, durationMs) },
+            "lossless" to { tryLossless(rawTitle, cleanTitle, artist, durationMs) },
+            "kugou" to { tryKugou(rawTitle, cleanTitle, artist, durationMs) },
+            "better-lyrics" to { tryBetterLyrics(rawTitle, cleanTitle, artist, durationMs) },
+            "lrclib" to { tryLrclib(rawTitle, cleanTitle, artist, durationMs) },
+        )
+        val futures: List<Pair<String, Future<FetchedPayload?>>> = tasks.map { (name, fn) ->
+            name to fetchPool.submit(Callable {
+                try {
+                    fn()
+                } catch (_: Throwable) {
+                    null
+                }
+            })
+        }
+        val deadline = System.currentTimeMillis() + PARALLEL_BUDGET_MS
+        val results = arrayOfNulls<FetchedPayload>(futures.size)
+        val done = BooleanArray(futures.size)
+        try {
+            while (true) {
+                var allDone = true
+                for (i in futures.indices) {
+                    if (!done[i] && futures[i].second.isDone) {
+                        done[i] = true
+                        results[i] = runCatching { futures[i].second.get() }.getOrNull()
+                    }
+                    if (!done[i]) allDone = false
+                }
+                // Check if the highest-priority undecided prefix is cleared and we already have a true word-sync hit
+                var prefixReady = true
+                for (i in futures.indices) {
+                    if (!done[i]) {
+                        prefixReady = false
+                        break
+                    }
+                    val r = results[i]
+                    if (r != null && r.isTrueWordSync) return r
+                }
+                if (allDone || System.currentTimeMillis() >= deadline) break
+                try {
+                    Thread.sleep(40L)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+        } finally {
+            futures.forEach { (_, f) -> if (!f.isDone) f.cancel(true) }
+        }
+        // Pick best true word-sync result first, then best line-synced result by priority order
+        results.firstOrNull { it != null && it.isTrueWordSync }?.let { return it }
+        results.firstOrNull { it != null }?.let { return it }
+        return tryLyricsOvh(rawTitle, cleanTitle, artist, durationMs)
+    }
+
+    // 0. Apple Music word-by-word (LyricsPlus v2 primary -> Lossless TTML -> iTunes + Paxsenix fallback)
     private fun tryAppleMusic(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
         tryLyricsPlus(rawTitle, cleanTitle, artist, durationMs)?.let { return it }
+        tryLossless(rawTitle, cleanTitle, artist, durationMs)?.let { return it }
         return try {
             val primaryArtist = primaryArtistName(artist)
             val term = if (primaryArtist.isNotBlank()) "$cleanTitle $primaryArtist" else cleanTitle
@@ -237,18 +310,84 @@ internal object OnlineLyricFetcher {
         }
     }
 
+    // 0b. Lossless / binimum.org Apple Music TTML archive (fast, duration-matched, word-sync prioritized)
+    private fun tryLossless(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
+        return try {
+            val primaryArtist = primaryArtistName(artist)
+            val sb = StringBuilder("https://lyrics-api.binimum.org/?track=${enc(cleanTitle)}")
+            if (primaryArtist.isNotBlank()) sb.append("&artist=${enc(primaryArtist)}")
+            if (durationMs > 0L) sb.append("&duration=${durationMs / 1000L}")
+            val searchBody = httpGetWithHeaders(
+                sb.toString(),
+                mapOf(
+                    "Referer" to "https://lossless.wtf/",
+                    "Origin" to "https://lossless.wtf",
+                    "Accept" to "application/json",
+                ),
+            ) ?: return null
+            val results = JSONObject(searchBody).optJSONArray("results") ?: return null
+            var bestUrl: String? = null
+            var bestScore = Long.MAX_VALUE
+            var bestIsWord = false
+            for (i in 0 until results.length()) {
+                val item = results.optJSONObject(i) ?: continue
+                val url = item.optString("lyricsUrl")
+                if (!url.startsWith("http")) continue
+                val isWord = item.optString("timing_type").equals("word", ignoreCase = true)
+                val itemDurMs = item.optLong("duration", 0L) * 1000L
+                val drift = if (durationMs > 0L && itemDurMs > 0L) abs(itemDurMs - durationMs) else 0L
+                if (durationMs > 0L && itemDurMs > 0L && drift > 6_000L) continue
+                val score = (if (isWord) 0L else 1_000_000L) + drift
+                if (score < bestScore) {
+                    bestScore = score
+                    bestUrl = url
+                    bestIsWord = isWord
+                }
+            }
+            val ttmlUrl = bestUrl ?: return null
+            val ttml = httpGetWithHeaders(
+                ttmlUrl,
+                mapOf(
+                    "Referer" to "https://lossless.wtf/",
+                    "Origin" to "https://lossless.wtf",
+                    "Accept" to "application/ttml+xml, application/xml, text/plain",
+                ),
+            ) ?: return null
+            val lrc = ttmlToEnhancedLrc(ttml)
+            if (lrc.isBlank()) return null
+            val hasWordTags = lrc.contains(Regex("""<\d{1,4}:\d{2}(?:[.:]\d{1,3})?>"""))
+            val payload = if (hasWordTags) {
+                JSONObject()
+                    .put("songName", rawTitle)
+                    .put("artist", artist)
+                    .put("lyric", lrc)
+                    .put("ttml", ttml)
+                    .toString()
+            } else {
+                buildLrcPayload(rawTitle, artist, lrc, durationMs)
+            }
+            Log.i(TAG, "Fetched TTML from Lossless (word=${bestIsWord || hasWordTags}, len=${lrc.length})")
+            FetchedPayload("apple-music", payload, isTrueWordSync = bestIsWord || hasWordTags)
+        } catch (e: Exception) {
+            Log.w(TAG, "Lossless failed: ${e.message}")
+            null
+        }
+    }
+
     // 1. Better Lyrics (Apple Music TTML word-by-word)
-    private fun tryBetterLyrics(rawTitle: String, cleanTitle: String, artist: String): FetchedPayload? {
+    private fun tryBetterLyrics(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
         return try {
             val primaryArtist = primaryArtistName(artist)
             val candidates = listOf(artist, primaryArtist).distinct().filter { it.isNotBlank() } + listOf("")
             for (candArtist in candidates) {
-                val url = "https://lyrics-api.boidu.dev/getLyrics?s=${enc(cleanTitle)}&a=${enc(candArtist)}"
-                val body = httpGet(url) ?: continue
+                val sb = StringBuilder("https://lyrics-api.boidu.dev/getLyrics?s=${enc(cleanTitle)}&a=${enc(candArtist)}")
+                if (durationMs > 0L) sb.append("&d=${durationMs / 1000L}")
+                val body = httpGet(sb.toString()) ?: continue
                 val json = JSONObject(body)
                 val ttml = json.optString("ttml").takeIf { it.isNotBlank() } ?: continue
                 val lrc = ttmlToEnhancedLrc(ttml)
                 if (lrc.isBlank()) continue
+                val hasWordTags = lrc.contains(Regex("""<\d{1,4}:\d{2}(?:[.:]\d{1,3})?>"""))
                 val payload = JSONObject()
                     .put("songName", rawTitle)
                     .put("artist", artist)
@@ -256,7 +395,7 @@ internal object OnlineLyricFetcher {
                     .put("ttml", ttml)
                     .toString()
                 Log.i(TAG, "Fetched TTML word-sync lyrics from Better Lyrics (${lrc.length} chars)")
-                return FetchedPayload("better-lyrics", payload)
+                return FetchedPayload("better-lyrics", payload, isTrueWordSync = hasWordTags)
             }
             null
         } catch (e: Exception) {
@@ -289,20 +428,29 @@ internal object OnlineLyricFetcher {
             val body = httpGet("https://lrclib.net/api/search?q=${enc(q)}") ?: return null
             val arr = JSONArray(body)
             var bestSynced: String? = null
+            var bestSyncedDrift = Long.MAX_VALUE
             var bestPlain: String? = null
-            for (i in 0 until minOf(arr.length(), 8)) {
+            for (i in 0 until minOf(arr.length(), 10)) {
                 val item = arr.optJSONObject(i) ?: continue
+                val itemDurMs = (item.optDouble("duration", 0.0) * 1000.0).toLong()
+                val drift = if (durationMs > 0L && itemDurMs > 0L) abs(itemDurMs - durationMs) else 0L
                 val synced = item.optString("syncedLyrics").takeIf { it.isNotBlank() }
                 if (synced != null) {
-                    bestSynced = synced
-                    break
+                    if (durationMs <= 0L || itemDurMs <= 0L || drift <= 6_000L) {
+                        if (drift < bestSyncedDrift) {
+                            bestSyncedDrift = drift
+                            bestSynced = synced
+                        }
+                    } else if (bestSynced == null) {
+                        bestSynced = synced
+                    }
                 }
                 if (bestPlain == null) {
                     bestPlain = item.optString("plainLyrics").takeIf { it.isNotBlank() }
                 }
             }
             val lrc = bestSynced ?: bestPlain?.let { plainToSyntheticLrc(it, durationMs) } ?: return null
-            Log.i(TAG, "Fetched lyrics from LRCLIB /search (synced=${bestSynced != null})")
+            Log.i(TAG, "Fetched lyrics from LRCLIB /search (synced=${bestSynced != null}, drift=${bestSyncedDrift}ms)")
             FetchedPayload("lrclib", buildLrcPayload(rawTitle, artist, lrc, durationMs))
         } catch (e: Exception) {
             Log.w(TAG, "LRCLIB /search failed: ${e.message}")
@@ -310,20 +458,48 @@ internal object OnlineLyricFetcher {
         }
     }
 
-    // 3. Kugou
+    // 3. Kugou (prefers decrypted KRC true word-by-word, falls back to LRC)
     private fun tryKugou(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
         return try {
-            val kw = if (artist.isNotBlank()) "$cleanTitle-$artist" else cleanTitle
+            val primaryArtist = primaryArtistName(artist)
+            val kw = if (primaryArtist.isNotBlank()) "$primaryArtist - $cleanTitle" else cleanTitle
             val dur = if (durationMs > 0L) durationMs else 240_000L
             val searchUrl = "https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=${enc(kw)}&duration=$dur"
             val searchBody = httpGet(searchUrl) ?: return null
             val candidates = JSONObject(searchBody).optJSONArray("candidates") ?: return null
             if (candidates.length() == 0) return null
-            val best = candidates.optJSONObject(0) ?: return null
-            val id = best.optString("id")
-            val accesskey = best.optString("accesskey")
-            if (id.isBlank() || accesskey.isBlank()) return null
+            var best: JSONObject? = null
+            var minDrift = Long.MAX_VALUE
+            for (i in 0 until candidates.length()) {
+                val c = candidates.optJSONObject(i) ?: continue
+                if (c.optString("id").isBlank() || c.optString("accesskey").isBlank()) continue
+                val cDur = c.optLong("duration", 0L)
+                val drift = if (durationMs > 0L && cDur > 0L) abs(cDur - durationMs) else 0L
+                if (durationMs > 0L && cDur > 0L && drift > 4_000L) continue
+                if (drift < minDrift) {
+                    minDrift = drift
+                    best = c
+                }
+            }
+            val chosen = best ?: return null
+            val id = chosen.optString("id")
+            val accesskey = chosen.optString("accesskey")
 
+            // Try KRC (true word-by-word) first
+            val krcUrl = "https://lyrics.kugou.com/download?ver=1&client=pc&id=${enc(id)}&accesskey=${enc(accesskey)}&fmt=krc&charset=utf8"
+            httpGet(krcUrl)?.let { dlBody ->
+                val contentB64 = JSONObject(dlBody).optString("content")
+                if (contentB64.isNotBlank()) {
+                    val decrypted = decryptKrc(Base64.decode(contentB64, Base64.DEFAULT))
+                    val elrc = decrypted?.let { krcToEnhancedLrc(it, cleanTitle) }
+                    if (!elrc.isNullOrBlank()) {
+                        Log.i(TAG, "Fetched KRC word-sync lyrics from Kugou (${elrc.length} chars)")
+                        return FetchedPayload("kugou-krc", buildLrcPayload(rawTitle, artist, elrc, durationMs), isTrueWordSync = true)
+                    }
+                }
+            }
+
+            // Fallback to plain LRC
             val dlUrl = "https://lyrics.kugou.com/download?ver=1&client=pc&id=${enc(id)}&accesskey=${enc(accesskey)}&fmt=lrc&charset=utf8"
             val dlBody = httpGet(dlUrl) ?: return null
             val contentB64 = JSONObject(dlBody).optString("content")
@@ -331,12 +507,79 @@ internal object OnlineLyricFetcher {
             val lrc = String(Base64.decode(contentB64, Base64.DEFAULT), StandardCharsets.UTF_8)
                 .removePrefix("\uFEFF")
             if (lrc.isBlank()) return null
-            Log.i(TAG, "Fetched lyrics from Kugou (${lrc.length} chars)")
+            Log.i(TAG, "Fetched LRC lyrics from Kugou (${lrc.length} chars)")
             FetchedPayload("kugou", buildLrcPayload(rawTitle, artist, lrc, durationMs))
         } catch (e: Exception) {
             Log.w(TAG, "Kugou failed: ${e.message}")
             null
         }
+    }
+
+    private fun decryptKrc(raw: ByteArray): String? {
+        if (raw.size <= 4 || String(raw, 0, 4, StandardCharsets.US_ASCII) != "krc1") return null
+        val body = ByteArray(raw.size - 4) { i -> (raw[i + 4].toInt() xor KRC_KEY[i % KRC_KEY.size]).toByte() }
+        val inflater = Inflater()
+        return try {
+            inflater.setInput(body)
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            while (!inflater.finished()) {
+                val n = inflater.inflate(buf)
+                if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) break
+                out.write(buf, 0, n)
+            }
+            out.toString("UTF-8")
+        } catch (_: Exception) {
+            null
+        } finally {
+            inflater.end()
+        }
+    }
+
+    private fun krcToEnhancedLrc(krc: String, cleanTitle: String): String {
+        val lineRe = Regex("""^\[(\d+),(\d+)]""")
+        val wordRe = Regex("""<(\d+),(\d+),\d+>([^<]*)""")
+        val out = StringBuilder()
+        var started = false
+        for (rawLine in krc.lineSequence()) {
+            val head = lineRe.find(rawLine) ?: continue
+            val lineStart = head.groupValues[1].toLongOrNull() ?: continue
+            val lineDur = head.groupValues[2].toLongOrNull() ?: 0L
+            val pieces = wordRe.findAll(rawLine.substring(head.range.last + 1)).toList()
+            if (pieces.isEmpty()) continue
+            val fullText = pieces.joinToString("") { it.groupValues[3] }.trim()
+            if (fullText.isEmpty()) continue
+            if (!started) {
+                val isCredit = fullText.contains('：') || fullText.contains(':') ||
+                    (fullText.startsWith(cleanTitle, ignoreCase = true) && fullText.contains(" - "))
+                if (isCredit) continue
+                started = true
+            }
+            val row = StringBuilder()
+            var lastEnd = lineStart
+            for (j in pieces.indices) {
+                val m = pieces[j]
+                val off = m.groupValues[1].toLongOrNull() ?: continue
+                val dur = m.groupValues[2].toLongOrNull() ?: 0L
+                val tok = m.groupValues[3]
+                if (tok.isEmpty()) continue
+                val wStart = lineStart + off
+                val wEnd = wStart + dur
+                row.append(formatAngleTime(wStart)).append(tok)
+                val nextOff = pieces.getOrNull(j + 1)?.groupValues?.get(1)?.toLongOrNull()
+                if (nextOff != null && wEnd + 60L < lineStart + nextOff) {
+                    row.append(formatAngleTime(wEnd))
+                }
+                if (wEnd > lastEnd) lastEnd = wEnd
+            }
+            if (row.isNotEmpty()) {
+                val finalEnd = maxOf(lineStart + lineDur, lastEnd)
+                out.append(formatLrcTime(lineStart)).append(row)
+                if (finalEnd > lineStart) out.append(formatAngleTime(finalEnd))
+                out.append('\n')
+            }
+        }
+        return out.toString()
     }
 
     // 4. lyrics.ovh (plain text fallback)
@@ -414,8 +657,10 @@ internal object OnlineLyricFetcher {
                     else -> "lyricsplus"
                 }
                 val payload = buildLrcPayload(rawTitle, artist, elrc, durationMs)
-                Log.i(TAG, "Fetched word-sync lyrics from LyricsPlus ($sourceTag, type=${json.optString("type")}, lines=${lyricsArr.length()})")
-                return FetchedPayload(sourceTag, payload)
+                val isWord = json.optString("type").equals("Word", ignoreCase = true) ||
+                    elrc.contains(Regex("""<\d{1,4}:\d{2}(?:[.:]\d{1,3})?>"""))
+                Log.i(TAG, "Fetched word-sync lyrics from LyricsPlus ($sourceTag, word=$isWord, lines=${lyricsArr.length()})")
+                return FetchedPayload(sourceTag, payload, isTrueWordSync = isWord)
             } catch (e: Exception) {
                 Log.w(TAG, "LyricsPlus failed ($candArtist): ${e.message}")
             }
@@ -728,13 +973,16 @@ internal object OnlineLyricFetcher {
         return hits >= 4
     }
 
-    private fun httpGet(urlStr: String): String? {
+    private fun httpGet(urlStr: String): String? = httpGetWithHeaders(urlStr, emptyMap())
+
+    private fun httpGetWithHeaders(urlStr: String, extraHeaders: Map<String, String>): String? {
         val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS
             setRequestProperty("User-Agent", USER_AGENT)
             setRequestProperty("Accept", "application/json, text/plain, */*")
+            extraHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
         }
         return try {
             if (conn.responseCode !in 200..299) null

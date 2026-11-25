@@ -173,6 +173,13 @@
     <string name="translate_target_lang">Translation language</string>
     <string name="translate_lang_system">Follow system</string>
     <string name="hook_status_fluid">Fluid Cloud (Live Alert)</string>
+    <string name="app_whitelist_title">App whitelist</string>
+    <string name="app_whitelist_summary">Only apply Fluid Cloud lyrics to selected music apps</string>
+    <string name="app_whitelist_select">Select allowed apps</string>
+    <string name="app_whitelist_selected_count">%1$d apps selected</string>
+    <string name="app_whitelist_none_selected">No apps selected (lyrics paused for all apps)</string>
+    <string name="app_whitelist_search">Search apps or package name…</string>
+    <string name="app_whitelist_save">Save</string>
     <string name="hook_status_lockscreen">Lock screen lyrics</string>
     <string name="hook_status_aod">Always-On Display (AOD)</string>
     <string name="hook_active">Hooked</string>

@@ -12,19 +12,12 @@ internal class NativeSlotVisibility(private val view: View) {
             restore()
         } else {
             if (!hiddenByModule) {
-                if (view.visibility == View.VISIBLE) {
-                    savedAlpha = view.alpha
-                    view.visibility = View.INVISIBLE
-                    view.alpha = 0f
-                    hiddenByModule = true
-                } else if (view.visibility != View.INVISIBLE) {
-                    hiddenByModule = false
-                }
-            } else {
-                // Re-enforce on every frame so OEM Lottie / MediaSeedling updates cannot flicker it back.
-                if (view.visibility == View.VISIBLE) view.visibility = View.INVISIBLE
-                if (view.alpha != 0f) view.alpha = 0f
+                savedAlpha = if (view.alpha > 0f) view.alpha else 1f
+                hiddenByModule = true
             }
+            // Always re-enforce on every frame so OEM Lottie / MediaSeedling / border wrappers cannot flicker back.
+            if (view.visibility != View.INVISIBLE) view.visibility = View.INVISIBLE
+            if (view.alpha != 0f) view.alpha = 0f
         }
     }
 

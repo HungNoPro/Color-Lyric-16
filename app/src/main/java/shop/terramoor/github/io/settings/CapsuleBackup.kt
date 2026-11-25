@@ -40,6 +40,8 @@ internal object CapsuleBackup {
             .put(CapsuleSettings.AOD_UNLOCK_WHITELIST, settings.aodUnlockWhitelist)
             .put(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE, settings.preventCapsuleCollapse)
             .put(CapsuleSettings.AUTO_CLEAR_CACHE, settings.autoClearCache)
+            .put(CapsuleSettings.APP_WHITELIST_ENABLED, settings.appWhitelistEnabled)
+            .put(CapsuleSettings.APP_WHITELIST_PACKAGES, CapsuleSettings.encodePackageSet(settings.appWhitelistPackages))
         CapsuleTuning.entries.forEach { data.put(it.key, settings[it]) }
         val appPreferences = JSONObject().put(TRANSLATION_HELP_HIDDEN, translationHelpHidden)
         return JSONObject().put("format", FORMAT).put("version", VERSION)
@@ -106,6 +108,8 @@ internal object CapsuleBackup {
             aodUnlockWhitelist = if (data.has(CapsuleSettings.AOD_UNLOCK_WHITELIST)) data.optBoolean(CapsuleSettings.AOD_UNLOCK_WHITELIST, lyrics.aodUnlockWhitelist) else lyrics.aodUnlockWhitelist,
             preventCapsuleCollapse = if (data.has(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE)) data.optBoolean(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE, lyrics.preventCapsuleCollapse) else lyrics.preventCapsuleCollapse,
             autoClearCache = if (data.has(CapsuleSettings.AUTO_CLEAR_CACHE)) data.optBoolean(CapsuleSettings.AUTO_CLEAR_CACHE, lyrics.autoClearCache) else lyrics.autoClearCache,
+            appWhitelistEnabled = if (data.has(CapsuleSettings.APP_WHITELIST_ENABLED)) data.optBoolean(CapsuleSettings.APP_WHITELIST_ENABLED, lyrics.appWhitelistEnabled) else lyrics.appWhitelistEnabled,
+            appWhitelistPackages = if (data.has(CapsuleSettings.APP_WHITELIST_PACKAGES)) CapsuleSettings.decodePackageSet(data.optString(CapsuleSettings.APP_WHITELIST_PACKAGES, "")) else lyrics.appWhitelistPackages,
             tuning = tuning,
         )
         val helpHidden = if (version < 10) null else {
@@ -153,6 +157,8 @@ internal fun SharedPreferences.Editor.writeSettings(settings: CapsuleSettings) {
     putBoolean(CapsuleSettings.AOD_UNLOCK_WHITELIST, settings.aodUnlockWhitelist)
     putBoolean(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE, settings.preventCapsuleCollapse)
     putBoolean(CapsuleSettings.AUTO_CLEAR_CACHE, settings.autoClearCache)
+    putBoolean(CapsuleSettings.APP_WHITELIST_ENABLED, settings.appWhitelistEnabled)
+    putString(CapsuleSettings.APP_WHITELIST_PACKAGES, CapsuleSettings.encodePackageSet(settings.appWhitelistPackages))
     CapsuleSettings.retiredTintKeys.forEach { remove(it) }
     CapsuleTuning.entries.forEach { putInt(it.key, settings[it]) }
 }

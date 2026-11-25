@@ -26,6 +26,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +40,7 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
@@ -47,12 +49,18 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.Dialog as ComposeDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -516,6 +524,179 @@ private fun SettingsPage(
 }
 
 @Composable
+private fun AppWhitelistDialog(
+    initialSelected: Set<String>,
+    onDismiss: () -> Unit,
+    onSave: (Set<String>) -> Unit,
+) {
+    val context = LocalContext.current
+    val dark = isSystemInDarkTheme()
+    val accent = CouiTheme.colorSchemeFor(dark).accent
+    var query by remember { mutableStateOf("") }
+    var selected by remember { mutableStateOf(initialSelected) }
+    var installedApps by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        val loaded = withContext(Dispatchers.IO) {
+            val pm = context.packageManager
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val resolved = pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
+            val musicHints = setOf(
+                "music", "spotify", "apple", "soundcloud", "tidal", "deezer", "youtube", "zing",
+                "nhaccuatui", "nct", "square", "poweramp", "neutron", "foobar", "netease", "qqmusic",
+                "kugou", "kuwo", "gramophone", "salt", "oto", "retro", "musicolet", "symfonium", "plexamp",
+            )
+            resolved.asSequence()
+                .mapNotNull { info ->
+                    val pkg = info.activityInfo?.packageName ?: return@mapNotNull null
+                    if (pkg == context.packageName) return@mapNotNull null
+                    val label = info.loadLabel(pm)?.toString()?.trim().takeUnless { it.isNullOrEmpty() } ?: pkg
+                    pkg to label
+                }
+                .distinctBy { it.first }
+                .sortedWith(
+                    compareByDescending<Pair<String, String>> { it.first in initialSelected }
+                        .thenByDescending { (pkg, label) ->
+                            val low = "$pkg $label".lowercase()
+                            musicHints.any { it in low }
+                        }
+                        .thenBy { it.second.lowercase() },
+                )
+                .toList()
+        }
+        installedApps = loaded
+    }
+
+    val filtered = remember(installedApps, query) {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) installedApps
+        else installedApps.filter { (pkg, label) ->
+            label.lowercase().contains(q) || pkg.lowercase().contains(q)
+        }
+    }
+
+    ComposeDialog(onDismissRequest = onDismiss) {
+        val surfaceColor = if (dark) Color(0xFF1F2126) else Color(0xFFFDFDFF)
+        val fieldBg = if (dark) Color(0xFF2B2E35) else Color(0xFFF1F3F7)
+        val titleColor = if (dark) Color.White else Color(0xFF111318)
+        val subColor = if (dark) Color(0xFFA0A6B2) else Color(0xFF666D7A)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(24.dp))
+                .background(surfaceColor)
+                .padding(20.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.app_whitelist_select),
+                style = COUITheme.textStyles.title2,
+                color = titleColor,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(12.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(fieldBg)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+            ) {
+                if (query.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.app_whitelist_search),
+                        color = subColor,
+                        style = COUITheme.textStyles.body2,
+                    )
+                }
+                BasicTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    textStyle = COUITheme.textStyles.body2.copy(color = titleColor),
+                    cursorBrush = SolidColor(accent),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 180.dp, max = 360.dp),
+            ) {
+                items(filtered, key = { it.first }) { (pkg, label) ->
+                    val checked = pkg in selected
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                selected = if (checked) selected - pkg else selected + pkg
+                            }
+                            .padding(horizontal = 8.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(if (checked) accent else fieldBg),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (checked) {
+                                Icon(
+                                    painterResource(R.drawable.ic_status_check),
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = label,
+                                color = titleColor,
+                                style = COUITheme.textStyles.body1,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = pkg,
+                                color = subColor,
+                                style = COUITheme.textStyles.body2,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+            ) {
+                TextButton(
+                    text = stringResource(android.R.string.cancel),
+                    onClick = onDismiss,
+                )
+                Button(
+                    onClick = { onSave(selected) },
+                    colors = ButtonDefaults.buttonColors(color = accent),
+                ) {
+                    Text(
+                        text = stringResource(R.string.app_whitelist_save),
+                        color = Color.White,
+                        style = COUITheme.textStyles.body1,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun UpdateAvailableDialog(
     release: GitHubUpdates.Result.Latest,
     currentVersion: String,
@@ -627,6 +808,17 @@ private fun HomePage(
     var cacheStats by remember {
         mutableStateOf(shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context))
     }
+    var showWhitelistDialog by remember { mutableStateOf(false) }
+    if (showWhitelistDialog) {
+        AppWhitelistDialog(
+            initialSelected = state.settings.appWhitelistPackages,
+            onDismiss = { showWhitelistDialog = false },
+            onSave = { selected ->
+                showWhitelistDialog = false
+                app.setAppWhitelist(selected)
+            },
+        )
+    }
     DisposableEffect(context) {
         val prefs = context.getSharedPreferences(
             shop.terramoor.github.io.lyrics.LyricBridgeProvider.HOOK_STATUS_PREFS,
@@ -698,6 +890,25 @@ private fun HomePage(
                 summary = stringResource(R.string.prevent_capsule_collapse_summary),
                 enabled = ready,
             )
+            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+            TactileSwitchPreference(
+                checked = state.settings.appWhitelistEnabled,
+                onCheckedChange = { app.set(CapsuleSettings.APP_WHITELIST_ENABLED, it) },
+                title = stringResource(R.string.app_whitelist_title),
+                summary = stringResource(R.string.app_whitelist_summary),
+                enabled = ready,
+            )
+            if (state.settings.appWhitelistEnabled) {
+                HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+                val count = state.settings.appWhitelistPackages.size
+                BasicComponent(
+                    title = stringResource(R.string.app_whitelist_select),
+                    summary = if (count > 0) stringResource(R.string.app_whitelist_selected_count, count)
+                    else stringResource(R.string.app_whitelist_none_selected),
+                    enabled = ready,
+                    onClick = { showWhitelistDialog = true },
+                )
+            }
         }
         SettingsGroup(stringResource(R.string.section_all_in_one)) {
             TuningDropdown(

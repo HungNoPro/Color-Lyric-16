@@ -168,6 +168,13 @@
     <string name="aod_unlock_whitelist_summary">Cho phép mọi trình phát nhạc hiển thị trên AOD (bỏ giới hạn chỉ Spotify)</string>
     <string name="prevent_capsule_collapse">Chặn thu nhỏ viên thuốc</string>
     <string name="prevent_capsule_collapse_summary">Giữ viên thuốc Fluid Cloud luôn mở rộng, không tự thu gọn sau một thời gian</string>
+    <string name="app_whitelist_title">Danh sách ứng dụng áp dụng</string>
+    <string name="app_whitelist_summary">Chỉ áp dụng lời nhạc Fluid Cloud cho các ứng dụng đã chọn</string>
+    <string name="app_whitelist_select">Chọn ứng dụng được phép</string>
+    <string name="app_whitelist_selected_count">Đã chọn %1$d ứng dụng</string>
+    <string name="app_whitelist_none_selected">Chưa chọn ứng dụng nào (tạm không áp dụng)</string>
+    <string name="app_whitelist_search">Tìm tên ứng dụng hoặc tên gói…</string>
+    <string name="app_whitelist_save">Lưu</string>
     <string name="auto_clear_lyric_cache">Tự động xoá bộ nhớ đệm lời bài hát</string>
     <string name="auto_clear_lyric_cache_summary">Tự dọn bộ nhớ đệm cũ hơn 7 ngày hoặc vượt quá 20 MB</string>
     <string name="clear_lyric_cache">Xoá bộ nhớ đệm lời bài hát</string>
