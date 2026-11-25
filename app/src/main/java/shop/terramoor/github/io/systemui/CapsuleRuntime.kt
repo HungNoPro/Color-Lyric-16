@@ -164,6 +164,13 @@ internal class CapsuleRuntime(
 
     fun isAodWhitelistUnlocked(): Boolean = settings.enabled && settings.aodUnlockWhitelist
 
+    fun shouldPreventCapsuleCollapse(): Boolean {
+        if (!settings.enabled || !settings.preventCapsuleCollapse) return false
+        val activeSession = session ?: return false
+        if (activeSession.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE) return false
+        return true
+    }
+
     fun bindAodMediaViews(title: android.widget.TextView?, artist: android.widget.TextView?) = onMain("AOD media bind") {
         if (title != null) aodTitleView = WeakReference(title)
         if (artist != null) aodArtistView = WeakReference(artist)
@@ -1172,6 +1179,7 @@ internal class CapsuleRuntime(
                     putString(LyricBridgeProvider.EXTRA_ARTIST, targetTrack.artist)
                     putLong(LyricBridgeProvider.EXTRA_DURATION_MS, trackDurationMs)
                     putString(LyricBridgeProvider.EXTRA_SOURCE_MODE, sourceMode.name)
+                    putBoolean(LyricBridgeProvider.EXTRA_AUTO_CLEAR_CACHE, settings.autoClearCache)
                 }
                 onlineExecutor.execute {
                     val reply = try {
@@ -1194,7 +1202,8 @@ internal class CapsuleRuntime(
                                 injectSeedlingLyrics(targetTrack.title, targetTrack.artist, lrcText)
                             }
                         lastLoggedLine = null
-                        val msg = "[lyrics] ONLINE($source), lines=${fetchedTimeline.lines.size}, translated=${fetchedTimeline.lines.count { !it.translation.isNullOrBlank() }}"
+                        val wordLines = fetchedTimeline.lines.count { it.words.isNotEmpty() }
+                        val msg = "[lyrics] ONLINE($source), lines=${fetchedTimeline.lines.size}, wordLines=$wordLines, translated=${fetchedTimeline.lines.count { !it.translation.isNullOrBlank() }}"
                         logLyrics(msg)
                         Log.i(TAG, msg)
                         render()

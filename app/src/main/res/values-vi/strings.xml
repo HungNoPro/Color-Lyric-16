@@ -162,8 +162,13 @@
     <string name="lockscreen_bridge_summary">Bơm lời bài hát trực tiếp vào màn hình khoá &amp; AOD gốc của ColorOS 16</string>
     <string name="aod_unlock_whitelist">Mở khoá whitelist AOD</string>
     <string name="aod_unlock_whitelist_summary">Cho phép mọi trình phát nhạc hiển thị trên AOD (bỏ giới hạn chỉ Spotify)</string>
+    <string name="prevent_capsule_collapse">Chặn thu nhỏ viên thuốc</string>
+    <string name="prevent_capsule_collapse_summary">Giữ viên thuốc Fluid Cloud luôn mở rộng, không tự thu gọn sau một thời gian</string>
+    <string name="auto_clear_lyric_cache">Tự động xoá bộ nhớ đệm lời bài hát</string>
+    <string name="auto_clear_lyric_cache_summary">Tự dọn bộ nhớ đệm cũ hơn 7 ngày hoặc vượt quá 20 MB</string>
     <string name="clear_lyric_cache">Xoá bộ nhớ đệm lời bài hát</string>
     <string name="clear_lyric_cache_summary">Xoá lời và bản dịch đã tải lưu trên máy</string>
+    <string name="lyric_cache_usage">Dung lượng bộ nhớ đệm: %1$s (%2$d tệp) — Nhấn để xoá</string>
     <string name="clear_lyric_cache_done">Đã xoá bộ nhớ đệm lời bài hát</string>
     <string name="contributor_title">Người đóng góp</string>
 </resources>

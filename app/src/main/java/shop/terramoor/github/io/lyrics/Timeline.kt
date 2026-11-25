@@ -140,12 +140,27 @@ internal class Timeline private constructor(
             return Timeline(originals.mapIndexed { i, line ->
                 val raw = rawByTime[line.startMs]
                 val rawEnd = raw?.takeIf { it.text == line.text }?.endMs
-                val end = (line.endMs ?: rawEnd ?: ends[line.startMs])?.takeIf { it > line.startMs }
-                val words = ttmlWords[line.startMs]?.match(line.text, line.startMs, end).orEmpty()
+                val end = (line.endMs ?: rawEnd ?: lookupNear(ends, line.startMs))?.takeIf { it > line.startMs }
+                val words = lookupNear(ttmlWords, line.startMs)?.match(line.text, line.startMs, end).orEmpty()
                     .ifEmpty { raw?.wordTimingFor(line, end).orEmpty() }
                     .ifEmpty { line.wordTimingFor(line, end) }
                 line.withTranslation(matched[i]).copy(endMs = end, words = words)
             }, titles, artist, translation)
+        }
+
+        private fun <T> lookupNear(map: Map<Long, T>, timestampMs: Long, toleranceMs: Long = 25L): T? {
+            map[timestampMs]?.let { return it }
+            if (map.isEmpty()) return null
+            var best: T? = null
+            var bestDiff = toleranceMs + 1L
+            for ((key, value) in map) {
+                val diff = kotlin.math.abs(key - timestampMs)
+                if (diff < bestDiff) {
+                    bestDiff = diff
+                    best = value
+                }
+            }
+            return best
         }
 
         private fun matchTranslations(originals: List<LyricLine>, translations: List<LyricLine>): Array<String?> {

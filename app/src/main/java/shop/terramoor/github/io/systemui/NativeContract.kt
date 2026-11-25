@@ -321,6 +321,10 @@ internal object NativeContract {
         val statusBarSpace = optional("status bar placeholder width", optionalMissing) {
             StatusBarSpace(loader)
         }
+        val cos16Shrink = optional("ColorOS 16 capsule auto-shrink callback", optionalMissing) {
+            val controllerClass = container.declaredMethod("getController").returnType
+            controllerClass.method("C", Void.TYPE)
+        }
 
         init {
             if (keys.isEmpty()) throw Mismatch("no instance String fields on ${item.returnType.name}")
@@ -501,7 +505,7 @@ internal object NativeContract {
             // 1) Media Seedling Card inside CapsuleView: ConstraintLayout -> [LinearLayout(left: CircleImageView), View(hole), LinearLayout(right: CircleImageLottieView), ImageFilterView(bg)]
             // 2) LiveAlert res/2s.xml: left_section (img_capsule) + right_section (capsule_text)
             val linearSections = active.descendants(6).filterIsInstance<android.widget.LinearLayout>()
-                .filter { it.isShown && it.width > 0 && it.childCount > 0 }.toList()
+                .filter { it.visibility != View.GONE && it.width > 0 && it.childCount > 0 }.toList()
             val leftSection = (active.views(leftSectionId).firstOrNull() as? ViewGroup)
                 ?: linearSections.minByOrNull { it.left }
             val rightSection = (active.views(rightSectionId).firstOrNull() as? ViewGroup)
@@ -509,17 +513,17 @@ internal object NativeContract {
 
             val artwork = (if (cos16ArtworkId != 0) leftSection?.views(cos16ArtworkId)?.firstOrNull() else null)
                 ?: leftSection?.descendants(5)?.firstOrNull {
-                    it.isShown && it is android.widget.ImageView && it.width > 0 && it.width <= active.height * 2
+                    it.visibility != View.GONE && it is android.widget.ImageView && it.width > 0 && it.width <= active.height * 2
                 }
                 ?: active.descendants(7).firstOrNull {
-                    it.isShown && it is android.widget.ImageView && it.width > 0 && it.width <= active.height * 2
+                    it.visibility != View.GONE && it is android.widget.ImageView && it.width > 0 && it.width <= active.height * 2
                 }
                 ?: leftSection
                 ?: active
 
             val rightWaveform = (if (cos16LottieId != 0) rightSection?.views(cos16LottieId)?.firstOrNull() else null)
                 ?: rightSection?.descendants(5)?.firstOrNull {
-                    it.isShown && it !== artwork && it.width > 0 && it.width <= active.height * 2 &&
+                    it.visibility != View.GONE && it !== artwork && it.width > 0 && it.width <= active.height * 2 &&
                         (it is android.widget.ImageView || it.javaClass.simpleName.contains("Lottie", ignoreCase = true))
                 }
                 ?: cos16DummyWaveforms.getOrPut(active) { View(active.context) }

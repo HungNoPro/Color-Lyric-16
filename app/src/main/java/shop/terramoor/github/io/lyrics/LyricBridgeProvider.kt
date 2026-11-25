@@ -14,6 +14,9 @@ class LyricBridgeProvider : ContentProvider() {
         val input = extras ?: return null
         return when (method) {
             METHOD_FETCH_LYRICS -> {
+                if (input.getBoolean(EXTRA_AUTO_CLEAR_CACHE, false)) {
+                    maybeAutoPruneCache(ctx)
+                }
                 val title = input.getString(EXTRA_TITLE).orEmpty()
                 val artist = input.getString(EXTRA_ARTIST)
                 val durationMs = input.getLong(EXTRA_DURATION_MS, 0L)
@@ -65,6 +68,7 @@ class LyricBridgeProvider : ContentProvider() {
         const val EXTRA_ARTIST = "artist"
         const val EXTRA_DURATION_MS = "duration_ms"
         const val EXTRA_SOURCE_MODE = "source_mode"
+        const val EXTRA_AUTO_CLEAR_CACHE = "auto_clear_cache"
         const val EXTRA_SOURCE = "source"
         const val EXTRA_PAYLOAD = "payload"
         const val EXTRA_LINES = "lines"
@@ -82,6 +86,16 @@ class LyricBridgeProvider : ContentProvider() {
             val aod: Boolean = false,
             val updatedAt: Long = 0L,
         )
+
+        @Volatile
+        private var lastAutoPruneMs = 0L
+
+        private fun maybeAutoPruneCache(context: android.content.Context) {
+            val now = System.currentTimeMillis()
+            if (now - lastAutoPruneMs < 6L * 3_600_000L) return
+            lastAutoPruneMs = now
+            OnlineLyricFetcher.pruneCache(context, maxAgeDays = 7, maxBytes = 20L * 1024L * 1024L)
+        }
 
         fun readHookStatus(context: android.content.Context): HookStatus {
             val prefs = context.getSharedPreferences(HOOK_STATUS_PREFS, android.content.Context.MODE_PRIVATE)

@@ -67,12 +67,15 @@ internal object TtmlWords {
         }.getOrDefault(emptyMap())
     }
 
-    private fun timeInSong(value: String?, parent: Long): Long? = TtmlEnds.timestamp(value)?.let {
-        // Provider clock expressions already carry the song time. Offset units inherit the parent.
-        if (value?.contains(':') == true) it else parent + it
+    private fun timeInSong(value: String?, parent: Long): Long? = TtmlEnds.timestamp(value)?.let { parsed ->
+        val raw = value?.trim().orEmpty()
+        // Clock expressions and Apple Music / Better Lyrics absolute second values already carry song time.
+        // Only treat offset units as relative to parent when parsed < parent and parent > 0.
+        if (raw.contains(':') || parent <= 0L || parsed >= parent) parsed else parent + parsed
     }
 
     private fun isAuxiliary(parser: XmlPullParser): Boolean = (0 until parser.attributeCount).any { index ->
-        parser.getAttributeName(index) == "role" && parser.getAttributeValue(index) in auxiliaryRoles
+        val attr = parser.getAttributeName(index)
+        (attr == "role" || attr.endsWith(":role")) && parser.getAttributeValue(index) in auxiliaryRoles
     }
 }

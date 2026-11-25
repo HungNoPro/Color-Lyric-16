@@ -38,6 +38,8 @@ internal object CapsuleBackup {
             .put(CapsuleSettings.TRANSLATE_TARGET_LANG, settings.translateTargetLang.name)
             .put(CapsuleSettings.LOCKSCREEN_BRIDGE, settings.lockscreenBridge)
             .put(CapsuleSettings.AOD_UNLOCK_WHITELIST, settings.aodUnlockWhitelist)
+            .put(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE, settings.preventCapsuleCollapse)
+            .put(CapsuleSettings.AUTO_CLEAR_CACHE, settings.autoClearCache)
         CapsuleTuning.entries.forEach { data.put(it.key, settings[it]) }
         val appPreferences = JSONObject().put(TRANSLATION_HELP_HIDDEN, translationHelpHidden)
         return JSONObject().put("format", FORMAT).put("version", VERSION)
@@ -102,6 +104,8 @@ internal object CapsuleBackup {
                 .let { name -> TranslateTargetLang.entries.firstOrNull { it.name == name } ?: lyrics.translateTargetLang },
             lockscreenBridge = if (data.has(CapsuleSettings.LOCKSCREEN_BRIDGE)) data.optBoolean(CapsuleSettings.LOCKSCREEN_BRIDGE, lyrics.lockscreenBridge) else lyrics.lockscreenBridge,
             aodUnlockWhitelist = if (data.has(CapsuleSettings.AOD_UNLOCK_WHITELIST)) data.optBoolean(CapsuleSettings.AOD_UNLOCK_WHITELIST, lyrics.aodUnlockWhitelist) else lyrics.aodUnlockWhitelist,
+            preventCapsuleCollapse = if (data.has(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE)) data.optBoolean(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE, lyrics.preventCapsuleCollapse) else lyrics.preventCapsuleCollapse,
+            autoClearCache = if (data.has(CapsuleSettings.AUTO_CLEAR_CACHE)) data.optBoolean(CapsuleSettings.AUTO_CLEAR_CACHE, lyrics.autoClearCache) else lyrics.autoClearCache,
             tuning = tuning,
         )
         val helpHidden = if (version < 10) null else {
@@ -147,6 +151,8 @@ internal fun SharedPreferences.Editor.writeSettings(settings: CapsuleSettings) {
     putString(CapsuleSettings.TRANSLATE_TARGET_LANG, settings.translateTargetLang.name)
     putBoolean(CapsuleSettings.LOCKSCREEN_BRIDGE, settings.lockscreenBridge)
     putBoolean(CapsuleSettings.AOD_UNLOCK_WHITELIST, settings.aodUnlockWhitelist)
+    putBoolean(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE, settings.preventCapsuleCollapse)
+    putBoolean(CapsuleSettings.AUTO_CLEAR_CACHE, settings.autoClearCache)
     CapsuleSettings.retiredTintKeys.forEach { remove(it) }
     CapsuleTuning.entries.forEach { putInt(it.key, settings[it]) }
 }

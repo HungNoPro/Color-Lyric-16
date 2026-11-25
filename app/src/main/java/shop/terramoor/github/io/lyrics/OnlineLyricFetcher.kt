@@ -24,6 +24,11 @@ internal object OnlineLyricFetcher {
         val payloadJson: String,
     )
 
+    data class CacheStats(
+        val fileCount: Int,
+        val totalBytes: Long,
+    )
+
     fun fetchLyrics(
         context: Context, title: String, artist: String?, durationMs: Long,
         sourceMode: String = "AUTO",
@@ -32,7 +37,7 @@ internal object OnlineLyricFetcher {
         val cleanTitle = sanitizeTrackTitle(title)
         if (cleanTitle.isEmpty()) return null
         val cleanArtist = artist?.trim().orEmpty()
-        val cacheKey = sha256("lyrics|$sourceMode|$cleanTitle|$cleanArtist|${durationMs / 1000}")
+        val cacheKey = sha256("lyrics_v2|$sourceMode|$cleanTitle|$cleanArtist|${durationMs / 1000}")
         readCache(context, cacheKey)?.let { cached ->
             val obj = try { JSONObject(cached) } catch (_: Exception) { null }
             if (obj != null && obj.has("payload")) {
@@ -63,6 +68,42 @@ internal object OnlineLyricFetcher {
             writeCache(context, cacheKey, wrap.toString())
         }
         return fetched
+    }
+
+    fun cacheStats(context: Context): CacheStats {
+        val dir = File(context.cacheDir, "online_lyrics_cache")
+        if (!dir.exists()) return CacheStats(0, 0L)
+        val files = dir.listFiles()?.filter { it.isFile }.orEmpty()
+        return CacheStats(files.size, files.sumOf { it.length() })
+    }
+
+    fun pruneCache(context: Context, maxAgeDays: Int = 7, maxBytes: Long = 20L * 1024L * 1024L): Int {
+        val dir = File(context.cacheDir, "online_lyrics_cache")
+        if (!dir.exists()) return 0
+        val files = dir.listFiles()?.filter { it.isFile }?.toMutableList() ?: return 0
+        val cutoff = System.currentTimeMillis() - maxAgeDays * 86_400_000L
+        var removed = 0
+        val iter = files.iterator()
+        while (iter.hasNext()) {
+            val f = iter.next()
+            if (f.lastModified() < cutoff) {
+                if (f.delete()) removed++
+                iter.remove()
+            }
+        }
+        var total = files.sumOf { it.length() }
+        if (total > maxBytes) {
+            files.sortBy { it.lastModified() }
+            for (f in files) {
+                if (total <= maxBytes) break
+                val len = f.length()
+                if (f.delete()) {
+                    removed++
+                    total -= len
+                }
+            }
+        }
+        return removed
     }
 
     fun clearCache(context: Context): Int {
@@ -167,6 +208,14 @@ internal object OnlineLyricFetcher {
                         .toString()
                     Log.i(TAG, "Fetched TTML word-sync lyrics from Apple Music (id=$resolvedId)")
                     return FetchedPayload("apple-music", payload)
+                }
+            }
+            val contentArr = obj.optJSONArray("content")
+            if (contentArr != null && contentArr.length() > 0) {
+                val elrcFromContent = paxsenixContentToEnhancedLrc(contentArr)
+                if (elrcFromContent.isNotBlank()) {
+                    Log.i(TAG, "Fetched word-sync JSON lyrics from Apple Music (id=$resolvedId)")
+                    return FetchedPayload("apple-music", buildLrcPayload(title, artist, elrcFromContent))
                 }
             }
             val elrc = obj.optString("elrc").takeIf { it.isNotBlank() }
@@ -324,13 +373,58 @@ internal object OnlineLyricFetcher {
         }
     }
 
+    private fun paxsenixContentToEnhancedLrc(content: JSONArray): String {
+        val out = StringBuilder()
+        for (i in 0 until content.length()) {
+            val lineObj = content.optJSONObject(i) ?: continue
+            val lineStart = lineObj.optLong("timestamp", -1L)
+            if (lineStart < 0L) continue
+            val lineEnd = lineObj.optLong("endtime", -1L)
+            val syllables = lineObj.optJSONArray("text")
+            if (syllables != null && syllables.length() > 0) {
+                val row = StringBuilder()
+                var lastEnd = -1L
+                for (j in 0 until syllables.length()) {
+                    val syl = syllables.optJSONObject(j) ?: continue
+                    val wordText = syl.optString("text")
+                    if (wordText.isEmpty()) continue
+                    val ts = syl.optLong("timestamp", lineStart)
+                    val end = syl.optLong("endtime", -1L)
+                    val part = syl.optBoolean("part", false)
+                    row.append(formatAngleTime(ts)).append(wordText)
+                    if (!part && j < syllables.length() - 1 && !wordText.endsWith(" ")) {
+                        row.append(' ')
+                    }
+                    if (end > lastEnd) lastEnd = end
+                }
+                if (row.isNotEmpty()) {
+                    val finalEnd = if (lineEnd > lineStart) lineEnd else lastEnd
+                    out.append(formatLrcTime(lineStart)).append(row)
+                    if (finalEnd > lineStart) out.append(formatAngleTime(finalEnd))
+                    out.append('\n')
+                }
+            } else {
+                val plain = lineObj.optString("text").trim()
+                if (plain.isNotEmpty()) {
+                    out.append(formatLrcTime(lineStart)).append(plain).append('\n')
+                }
+            }
+        }
+        return out.toString()
+    }
+
     private fun ttmlToBasicLrc(ttml: String): String {
         val pRegex = Regex("""<p\b[^>]*\bbegin="([^"]+)"[^>]*>(.*?)</p>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+        val auxSpanRegex = Regex(
+            """<span\b[^>]*\b(?:[a-zA-Z0-9_-]+:)?role="(?:x-bg|x-translation|x-roman|translation|romanization|background)"[^>]*>.*?</span>""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        )
         val tagRegex = Regex("""<[^>]+>""")
         val out = StringBuilder()
         for (match in pRegex.findAll(ttml)) {
             val ms = parseTtmlTimeMs(match.groupValues[1]) ?: continue
-            val text = decodeXmlEntities(tagRegex.replace(match.groupValues[2], "")).replace(Regex("\\s+"), " ").trim()
+            val strippedAux = auxSpanRegex.replace(match.groupValues[2], "")
+            val text = decodeXmlEntities(tagRegex.replace(strippedAux, "")).replace(Regex("\\s+"), " ").trim()
             if (text.isEmpty()) continue
             out.append(formatLrcTime(ms)).append(text).append('\n')
         }
@@ -375,8 +469,16 @@ internal object OnlineLyricFetcher {
         val safe = ms.coerceAtLeast(0L)
         val min = safe / 60_000L
         val sec = (safe % 60_000L) / 1000L
-        val cs = (safe % 1000L) / 10L
-        return String.format(Locale.US, "[%02d:%02d.%02d]", min, sec, cs)
+        val millis = safe % 1000L
+        return String.format(Locale.US, "[%02d:%02d.%03d]", min, sec, millis)
+    }
+
+    private fun formatAngleTime(ms: Long): String {
+        val safe = ms.coerceAtLeast(0L)
+        val min = safe / 60_000L
+        val sec = (safe % 60_000L) / 1000L
+        val millis = safe % 1000L
+        return String.format(Locale.US, "<%02d:%02d.%03d>", min, sec, millis)
     }
 
     private fun decodeXmlEntities(s: String): String = s

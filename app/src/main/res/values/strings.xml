@@ -177,8 +177,13 @@
     <string name="lockscreen_bridge_summary">Inject built-in lyrics into ColorOS 16 lock screen &amp; AOD</string>
     <string name="aod_unlock_whitelist">Unlock AOD player whitelist</string>
     <string name="aod_unlock_whitelist_summary">Allow all music players on AOD (removes Spotify-only limit)</string>
+    <string name="prevent_capsule_collapse">Prevent capsule auto-shrink</string>
+    <string name="prevent_capsule_collapse_summary">Keep the Fluid Cloud pill expanded instead of collapsing after a timeout</string>
+    <string name="auto_clear_lyric_cache">Auto-clear lyric cache</string>
+    <string name="auto_clear_lyric_cache_summary">Automatically prune cached lyrics older than 7 days or over 20 MB</string>
     <string name="clear_lyric_cache">Clear lyric &amp; translation cache</string>
     <string name="clear_lyric_cache_summary">Remove saved online lyrics and translations</string>
+    <string name="lyric_cache_usage">Cache size: %1$s (%2$d files) — Tap to clear</string>
     <string name="clear_lyric_cache_done">Lyric cache cleared</string>
     <string name="contributor_title">Contributor</string>
     <string name="contributor_name" translatable="false">hungnopro (github.com/hungnopro)</string>

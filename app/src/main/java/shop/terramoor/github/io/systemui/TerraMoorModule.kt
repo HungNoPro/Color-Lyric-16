@@ -64,6 +64,16 @@ class TerraMoorModule : XposedModule() {
                     if (retained) null else chain.proceed()
                 }
             } }
+            // Prevent ColorOS 16 status-bar media capsule auto-collapse after timeout
+            installOptional(hooks, "ColorOS 16 statusBarTimeoutRunnable hook") {
+                val timeoutCls = param.classLoader.loadClass(
+                    "com.oplus.systemui.seedlingservice.mediaControl.MediaControlTip\$statusBarTimeoutRunnable\$1",
+                )
+                val runMethod = timeoutCls.getDeclaredMethod("run")
+                hook(runMethod).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    if (runtime.shouldPreventCapsuleCollapse()) null else chain.proceed()
+                }
+            }
             host.release?.let { method -> installOptional(hooks, "Media release hook") {
                 after(method) { instance, _, _ -> runtime.mediaReleased(instance) }
             } }
@@ -259,6 +269,11 @@ class TerraMoorModule : XposedModule() {
             } }
             plugin.layout?.let { method -> installOptional(hooks, "Plugin layout hook") {
                 after(method) { receiver, _, _ -> runtime.containerLaidOut(receiver) }
+            } }
+            plugin.cos16Shrink?.let { method -> installOptional(hooks, "ColorOS 16 capsule shrink guard hook") {
+                hook(method).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    if (runtime.shouldPreventCapsuleCollapse()) null else chain.proceed()
+                }
             } }
             return hooks
         } catch (failure: Throwable) {

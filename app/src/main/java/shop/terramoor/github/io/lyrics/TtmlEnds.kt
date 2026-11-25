@@ -6,7 +6,7 @@ import org.xmlpull.v1.XmlPullParser
 /** TTML is timing metadata here. Untimed TTML still falls back to track info. */
 internal object TtmlEnds {
     private val clock = Regex("""(?:(\d{1,4}):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?""")
-    private val offset = Regex("""(\d{1,7}(?:\.\d{1,3})?)(ms|s)""")
+    private val offset = Regex("""(\d{1,7}(?:\.\d{1,3})?)(ms|s)?""")
 
     fun parse(text: String): Map<Long, Long> {
         if (text.isBlank() || text.contains("<!DOCTYPE", ignoreCase = true)) return emptyMap()
@@ -37,13 +37,15 @@ internal object TtmlEnds {
     }
 
     internal fun timestamp(value: String?): Long? {
-        if (value == null) return null
-        clock.matchEntire(value)?.destructured?.let { (hour, minute, second, fraction) ->
+        val raw = value?.trim() ?: return null
+        if (raw.isEmpty()) return null
+        clock.matchEntire(raw)?.destructured?.let { (hour, minute, second, fraction) ->
             if (second.toInt() >= 60 || (hour.isNotEmpty() && minute.toInt() >= 60)) return null
             val seconds = (hour.toLongOrNull() ?: 0) * 3600 + minute.toLong() * 60 + second.toLong()
             return seconds * 1000 + fraction.padEnd(3, '0').toLong()
         }
-        val (number, unit) = offset.matchEntire(value)?.destructured ?: return null
-        return (number.toDouble() * if (unit == "s") 1000 else 1).toLong()
+        val (number, unit) = offset.matchEntire(raw)?.destructured ?: return null
+        val multiplier = if (unit == "ms") 1.0 else 1000.0
+        return (number.toDouble() * multiplier).toLong()
     }
 }

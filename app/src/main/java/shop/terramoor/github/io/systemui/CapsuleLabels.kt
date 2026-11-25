@@ -181,6 +181,8 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
     fun draw(canvas: Canvas, animatedWidth: Int?): String {
         if (!capsule.isShown) return "CAPSULE_HIDDEN"
         if (displayLine == null && artwork == null) return "NO_LYRIC_OR_ARTWORK"
+        // Re-enforce cover/waveform hiding right before child views draw to eliminate OEM flicker.
+        enforceNativeVisibility()
         val width = capsule.width
         val height = capsule.height.toFloat()
         if (width <= 0 || height <= 0) return "EMPTY_DRAWING_AREA"

@@ -573,12 +573,16 @@ private fun HomePage(
     var hookStatus by remember {
         mutableStateOf(shop.terramoor.github.io.lyrics.LyricBridgeProvider.readHookStatus(context))
     }
+    var cacheStats by remember {
+        mutableStateOf(shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context))
+    }
     DisposableEffect(context) {
         val prefs = context.getSharedPreferences(
             shop.terramoor.github.io.lyrics.LyricBridgeProvider.HOOK_STATUS_PREFS,
             android.content.Context.MODE_PRIVATE,
         )
         hookStatus = shop.terramoor.github.io.lyrics.LyricBridgeProvider.readHookStatus(context)
+        cacheStats = shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context)
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             hookStatus = shop.terramoor.github.io.lyrics.LyricBridgeProvider.readHookStatus(context)
         }
@@ -635,6 +639,14 @@ private fun HomePage(
                 title = stringResource(R.string.enable_lyrics),
                 enabled = ready,
             )
+            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+            TactileSwitchPreference(
+                checked = state.settings.preventCapsuleCollapse,
+                onCheckedChange = { app.set(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE, it) },
+                title = stringResource(R.string.prevent_capsule_collapse),
+                summary = stringResource(R.string.prevent_capsule_collapse_summary),
+                enabled = ready,
+            )
         }
         SettingsGroup(stringResource(R.string.section_all_in_one)) {
             TuningDropdown(
@@ -683,11 +695,27 @@ private fun HomePage(
                 enabled = ready,
             )
             HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+            TactileSwitchPreference(
+                checked = state.settings.autoClearCache,
+                onCheckedChange = { enabled ->
+                    app.set(CapsuleSettings.AUTO_CLEAR_CACHE, enabled)
+                    if (enabled) {
+                        shop.terramoor.github.io.lyrics.OnlineLyricFetcher.pruneCache(context)
+                        cacheStats = shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context)
+                    }
+                },
+                title = stringResource(R.string.auto_clear_lyric_cache),
+                summary = stringResource(R.string.auto_clear_lyric_cache_summary),
+                enabled = ready,
+            )
+            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+            val formattedCacheSize = android.text.format.Formatter.formatShortFileSize(context, cacheStats.totalBytes)
             BasicComponent(
                 title = stringResource(R.string.clear_lyric_cache),
-                summary = stringResource(R.string.clear_lyric_cache_summary),
+                summary = stringResource(R.string.lyric_cache_usage, formattedCacheSize, cacheStats.fileCount),
                 onClick = {
                     shop.terramoor.github.io.lyrics.OnlineLyricFetcher.clearCache(context)
+                    cacheStats = shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context)
                     Toast.makeText(context, R.string.clear_lyric_cache_done, Toast.LENGTH_SHORT).show()
                 },
             )

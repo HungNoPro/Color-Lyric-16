@@ -103,6 +103,8 @@ internal data class CapsuleSettings(
     val translateTargetLang: TranslateTargetLang = TranslateTargetLang.SYSTEM,
     val lockscreenBridge: Boolean = true,
     val aodUnlockWhitelist: Boolean = true,
+    val preventCapsuleCollapse: Boolean = true,
+    val autoClearCache: Boolean = false,
     private val tuning: Map<CapsuleTuning, Int> = emptyMap(),
 ) {
 
@@ -158,6 +160,8 @@ internal data class CapsuleSettings(
         const val TRANSLATE_TARGET_LANG = "translate_target_lang"
         const val LOCKSCREEN_BRIDGE = "lockscreen_bridge"
         const val AOD_UNLOCK_WHITELIST = "aod_unlock_whitelist"
+        const val PREVENT_CAPSULE_COLLAPSE = "prevent_capsule_collapse"
+        const val AUTO_CLEAR_CACHE = "auto_clear_cache"
         private val DEFAULT_NO_LYRICS_MODE = NoLyricsMode.TRACK
 
         private val defaults = CapsuleSettings()
@@ -191,6 +195,8 @@ internal data class CapsuleSettings(
                 translateTargetLang = prefs.enumValue(TRANSLATE_TARGET_LANG, defaults.translateTargetLang),
                 lockscreenBridge = prefs.getBoolean(LOCKSCREEN_BRIDGE, defaults.lockscreenBridge),
                 aodUnlockWhitelist = prefs.getBoolean(AOD_UNLOCK_WHITELIST, defaults.aodUnlockWhitelist),
+                preventCapsuleCollapse = prefs.getBoolean(PREVENT_CAPSULE_COLLAPSE, defaults.preventCapsuleCollapse),
+                autoClearCache = prefs.getBoolean(AUTO_CLEAR_CACHE, defaults.autoClearCache),
                 tuning = CapsuleTuning.entries.associateWith { option ->
                     if (option == CapsuleTuning.TINT_STRENGTH && !prefs.contains(option.key) &&
                         (prefs.contains(LEGACY_FIRST_ROW_TINT) || prefs.contains(LEGACY_SECOND_ROW_TINT))) {
