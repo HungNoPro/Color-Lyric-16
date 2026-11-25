@@ -74,6 +74,48 @@ class TerraMoorModule : XposedModule() {
                     if (runtime.shouldPreventCapsuleCollapse()) null else chain.proceed()
                 }
             }
+            installOptional(hooks, "ColorOS 16 MediaControlTip hide guard hook") {
+                val tipCls = param.classLoader.loadClass(
+                    "com.oplus.systemui.seedlingservice.mediaControl.MediaControlTip",
+                )
+                val cardCls = param.classLoader.loadClass(
+                    "com.oplus.pantanal.seedling.bean.SeedlingCard",
+                )
+                val hideMethod = tipCls.getDeclaredMethod(
+                    "hideStatusBarSeedlingCard",
+                    cardCls,
+                    Boolean::class.javaPrimitiveType,
+                )
+                val showFlagField = runCatching {
+                    tipCls.getDeclaredField("isMediaSeedlingShowOnStatusBar").apply { isAccessible = true }
+                }.getOrNull()
+                val disableFlagsField = runCatching {
+                    tipCls.getDeclaredField("disableSeedlingFlags").apply { isAccessible = true }
+                }.getOrNull()
+                runCatching {
+                    val dataCls = param.classLoader.loadClass(
+                        "com.oplus.systemui.seedlingservice.mediaControl.SeedlingMediaData",
+                    )
+                    val shouldHideMethod = tipCls.getDeclaredMethod(
+                        "shouldStatusBarSeedlingCardHidden",
+                        dataCls,
+                        String::class.java,
+                        Boolean::class.javaPrimitiveType,
+                    )
+                    hooks += hook(shouldHideMethod).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                        if (runtime.shouldPreventCapsuleCollapse()) {
+                            val enabled = showFlagField?.getBoolean(null) != false
+                            val disabledByFlag = ((disableFlagsField?.getInt(null) ?: 0) and 1) != 0
+                            if (enabled && !disabledByFlag) return@intercept false
+                        }
+                        chain.proceed()
+                    }
+                }
+                hook(hideMethod).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    val isForceHide = chain.args.getOrNull(1) as? Boolean ?: false
+                    if (!isForceHide && runtime.shouldPreventCapsuleCollapse()) null else chain.proceed()
+                }
+            }
             host.release?.let { method -> installOptional(hooks, "Media release hook") {
                 after(method) { instance, _, _ -> runtime.mediaReleased(instance) }
             } }
@@ -241,6 +283,11 @@ class TerraMoorModule : XposedModule() {
                 (args.firstOrNull() as? Canvas)?.let { runtime.draw(receiver, it) }
             }
             diagnostics?.note("Required plugin hook installed: ${plugin.draw.declaringClass.name}#${plugin.draw.name}")
+            plugin.measure?.let { method -> installOptional(hooks, "Capsule measure width hook") {
+                before(method, "Capsule measure width") { receiver, _ ->
+                    runtime.prepareCapsuleMeasure(receiver)
+                }
+            } }
             plugin.widthChange?.let { method -> installOptional(hooks, "Capsule width handoff hook") {
                 after(method) { receiver, args, _ ->
                     if (args.firstOrNull() == true) runtime.nativeWidthAnimationStarted(receiver)
@@ -270,9 +317,15 @@ class TerraMoorModule : XposedModule() {
             plugin.layout?.let { method -> installOptional(hooks, "Plugin layout hook") {
                 after(method) { receiver, _, _ -> runtime.containerLaidOut(receiver) }
             } }
-            plugin.cos16Shrink?.let { method -> installOptional(hooks, "ColorOS 16 capsule shrink guard hook") {
-                hook(method).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
-                    if (runtime.shouldPreventCapsuleCollapse()) null else chain.proceed()
+            plugin.cos16FluidEvent?.let { fluidEvent -> installOptional(hooks, "ColorOS 16 capsule timeout event guard hook") {
+                hook(fluidEvent.dispatch).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    val name = fluidEvent.eventName(chain.args.firstOrNull())
+                    if (name == "EVENT_CAPSULE_TIME_OUT" && runtime.shouldPreventCapsuleCollapse()) {
+                        diagnostics?.note("Blocked ColorOS 16 EVENT_CAPSULE_TIME_OUT")
+                        null
+                    } else {
+                        chain.proceed()
+                    }
                 }
             } }
             return hooks

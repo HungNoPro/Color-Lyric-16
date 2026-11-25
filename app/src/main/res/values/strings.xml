@@ -127,6 +127,10 @@
     <string name="update_up_to_date">You’re up to date (%1$s)</string>
     <string name="update_latest_tag">Latest GitHub release: %1$s</string>
     <string name="update_view_release">View releases and downloads</string>
+    <string name="update_dialog_title">Update available</string>
+    <string name="update_dialog_message">Version %1$s is available (current: %2$s).</string>
+    <string name="update_dialog_download">Update now</string>
+    <string name="update_dialog_later">Later</string>
     <string name="support_group">QQ group</string>
     <string name="copy_support_group">Copy group number</string>
     <string name="support_group_copied">Copied</string>

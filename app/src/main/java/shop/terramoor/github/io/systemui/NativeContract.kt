@@ -293,6 +293,9 @@ internal object NativeContract {
             ViewGroup::class.java.getDeclaredMethod("dispatchDraw", Canvas::class.java).apply { isAccessible = true }
         }
         val draw = capsule.method("onDraw", Void.TYPE, Canvas::class.java)
+        val measure = optional("capsule measure callback", optionalMissing) {
+            capsule.method("onMeasure", Void.TYPE, Int::class.javaPrimitiveType!!, Int::class.javaPrimitiveType!!)
+        }
         val contentChanged = optional("early content update", optionalMissing) {
             try {
                 container.method("h", Void.TYPE,
@@ -321,9 +324,19 @@ internal object NativeContract {
         val statusBarSpace = optional("status bar placeholder width", optionalMissing) {
             StatusBarSpace(loader)
         }
-        val cos16Shrink = optional("ColorOS 16 capsule auto-shrink callback", optionalMissing) {
-            val controllerClass = container.declaredMethod("getController").returnType
-            controllerClass.method("C", Void.TYPE)
+        val cos16FluidEvent = optional("ColorOS 16 fluid event timeout guard", optionalMissing) {
+            Cos16FluidEvent(loader)
+        }
+
+        class Cos16FluidEvent(loader: ClassLoader) {
+            private val eventBase = loader.requiredClass("b5.a")
+            private val eventType = loader.requiredClass("j5.d")
+            private val dispatcher = loader.requiredClass("m7.l0")
+            val dispatch = dispatcher.method("d1", Void.TYPE, eventType)
+            private val getName = eventBase.method("getName", String::class.java)
+
+            fun eventName(event: Any?): String? =
+                if (event != null && eventBase.isInstance(event)) getName.invoke(event) as? String else null
         }
 
         init {
@@ -424,6 +437,7 @@ internal object NativeContract {
                 val playerId = notificationKey.removePrefix(COS16_KEY_PREFIX)
                 return capsuleKeys.any { k ->
                     k == playerId ||
+                        k.startsWith("268452006") ||
                         k.contains("media", ignoreCase = true) ||
                         k.contains("music", ignoreCase = true) ||
                         k.contains("seedling", ignoreCase = true) ||
@@ -504,8 +518,9 @@ internal object NativeContract {
             // ColorOS 16 capsule binding:
             // 1) Media Seedling Card inside CapsuleView: ConstraintLayout -> [LinearLayout(left: CircleImageView), View(hole), LinearLayout(right: CircleImageLottieView), ImageFilterView(bg)]
             // 2) LiveAlert res/2s.xml: left_section (img_capsule) + right_section (capsule_text)
+            val maxIconBound = maxOf(active.height, 90) * 2
             val linearSections = active.descendants(6).filterIsInstance<android.widget.LinearLayout>()
-                .filter { it.visibility != View.GONE && it.width > 0 && it.childCount > 0 }.toList()
+                .filter { it.visibility != View.GONE && it.childCount > 0 }.toList()
             val leftSection = (active.views(leftSectionId).firstOrNull() as? ViewGroup)
                 ?: linearSections.minByOrNull { it.left }
             val rightSection = (active.views(rightSectionId).firstOrNull() as? ViewGroup)
@@ -513,17 +528,17 @@ internal object NativeContract {
 
             val artwork = (if (cos16ArtworkId != 0) leftSection?.views(cos16ArtworkId)?.firstOrNull() else null)
                 ?: leftSection?.descendants(5)?.firstOrNull {
-                    it.visibility != View.GONE && it is android.widget.ImageView && it.width > 0 && it.width <= active.height * 2
+                    it.visibility != View.GONE && it is android.widget.ImageView && it.width <= maxIconBound
                 }
                 ?: active.descendants(7).firstOrNull {
-                    it.visibility != View.GONE && it is android.widget.ImageView && it.width > 0 && it.width <= active.height * 2
+                    it.visibility != View.GONE && it is android.widget.ImageView && it.width <= maxIconBound
                 }
                 ?: leftSection
                 ?: active
 
             val rightWaveform = (if (cos16LottieId != 0) rightSection?.views(cos16LottieId)?.firstOrNull() else null)
                 ?: rightSection?.descendants(5)?.firstOrNull {
-                    it.visibility != View.GONE && it !== artwork && it.width > 0 && it.width <= active.height * 2 &&
+                    it.visibility != View.GONE && it !== artwork && it.width <= maxIconBound &&
                         (it is android.widget.ImageView || it.javaClass.simpleName.contains("Lottie", ignoreCase = true))
                 }
                 ?: cos16DummyWaveforms.getOrPut(active) { View(active.context) }

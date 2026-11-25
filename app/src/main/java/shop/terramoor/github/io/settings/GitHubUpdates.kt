@@ -25,7 +25,12 @@ internal object GitHubUpdates {
         data object Checking : Result
         data object NoRelease : Result
         data object Failed : Result
-        data class Latest(val tag: String, val comparison: Comparison) : Result
+        data class Latest(
+            val tag: String,
+            val comparison: Comparison,
+            val releaseNotes: String = "",
+            val releaseUrl: String = RELEASES_URL,
+        ) : Result
     }
 
     suspend fun check(versionCode: Long, versionName: String): Result = withContext(Dispatchers.IO) {
@@ -33,8 +38,16 @@ internal object GitHubUpdates {
             val (status, body) = request("/releases/latest")
             when {
                 status == HttpURLConnection.HTTP_OK -> {
-                    val tag = JSONObject(body).getString("tag_name")
-                    if (tag.isBlank()) Result.Failed else Result.Latest(tag, compare(tag, versionCode, versionName))
+                    val json = JSONObject(body)
+                    val tag = json.optString("tag_name")
+                    val htmlUrl = json.optString("html_url").takeIf { it.isNotBlank() } ?: RELEASES_URL
+                    val notes = formatReleaseNotes(json.optString("body"))
+                    if (tag.isBlank()) Result.Failed else Result.Latest(
+                        tag = tag,
+                        comparison = compare(tag, versionCode, versionName),
+                        releaseNotes = notes,
+                        releaseUrl = htmlUrl,
+                    )
                 }
                 status == HttpURLConnection.HTTP_NOT_FOUND && request("").first == HttpURLConnection.HTTP_OK -> {
                     Result.NoRelease
@@ -86,5 +99,11 @@ internal object GitHubUpdates {
             if (remoteNumber < localNumber) return Comparison.UP_TO_DATE
         }
         return Comparison.UP_TO_DATE
+    }
+
+    private fun formatReleaseNotes(raw: String): String {
+        val cleaned = raw.replace("\r\n", "\n").trim()
+        if (cleaned.isEmpty()) return ""
+        return if (cleaned.length > 420) cleaned.take(417).trimEnd() + "…" else cleaned
     }
 }

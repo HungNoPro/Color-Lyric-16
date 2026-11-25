@@ -132,6 +132,7 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
         val normalWidth = capsuleWidthPixels(settings[CapsuleTuning.ISLAND_WIDTH], density)
         updateCapsuleWidth(normalWidth)
         setFillerWidth(capsuleWidthPixels(CapsuleTuning.ISLAND_WIDTH.range.last / 2, density))
+        if (capsule.width > 0) alignTrailingSection(capsule.width)
     }
 
     fun prepareViewport(now: Long, canCompact: Boolean, resumeInterlude: Boolean = false,
@@ -186,6 +187,19 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
         val width = capsule.width
         val height = capsule.height.toFloat()
         if (width <= 0 || height <= 0) return "EMPTY_DRAWING_AREA"
+        // If OEM animation left the native background/foreground bounds stuck at 300px/59px, sync them immediately.
+        if (animatedWidth == null) {
+            capsule.background?.let { bg ->
+                if (bg.bounds.left != 0 || bg.bounds.right != width || bg.bounds.bottom != capsule.height) {
+                    bg.setBounds(0, 0, width, capsule.height)
+                }
+            }
+            capsule.foreground?.let { fg ->
+                if (fg.bounds.left != 0 || fg.bounds.right != width || fg.bounds.bottom != capsule.height) {
+                    fg.setBounds(0, 0, width, capsule.height)
+                }
+            }
+        }
         // During a media card handoff the outline still supplies the interlude viewport.
         // The native animated clip can narrow it further without moving the lyric slots.
         val inset = viewport.inset
@@ -304,23 +318,48 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
 
     private fun updateCapsuleWidth(requestedWidth: Int?) {
         val params = capsule.layoutParams ?: return
-        if (params !== sizedParams || params.width != appliedWidth) {
+        if (params !== sizedParams) {
             sizedParams = params
             nativeWidth = params.width
             appliedWidth = null
+        } else if (appliedWidth == null && params.width != nativeWidth) {
+            nativeWidth = params.width
         }
         if (requestedWidth == null && appliedWidth == null) {
             if (capsule.minimumWidth != nativeMinimumWidth) capsule.minimumWidth = nativeMinimumWidth
             return
         }
-        val width = if (requestedWidth == null) nativeWidth
-        else if (nativeWidth >= 0) minOf(nativeWidth, requestedWidth)
-        else requestedWidth
+        val width = requestedWidth ?: nativeWidth
         val minimum = if (requestedWidth == null) nativeMinimumWidth else width
-        if (capsule.minimumWidth != minimum) capsule.minimumWidth = minimum
+        var changed = false
+        if (capsule.minimumWidth != minimum) {
+            capsule.minimumWidth = minimum
+            changed = true
+        }
         if (params.width != width) {
             params.width = width
             capsule.layoutParams = params
+            changed = true
+        }
+        val parent = capsule.parent as? ViewGroup
+        if (requestedWidth != null) {
+            if (capsule.clipChildren) capsule.clipChildren = false
+            if (capsule.clipToPadding) capsule.clipToPadding = false
+            if (parent != null) {
+                if (parent.clipChildren) parent.clipChildren = false
+                if (parent.clipToPadding) parent.clipToPadding = false
+            }
+            // ColorOS 16 unlock/card-exit animations can leave measuredWidth stuck at 300px
+            // without changing LayoutParams.width; only relayout when measuredWidth itself disagrees.
+            if (!changed && capsule.isLaidOut && capsule.measuredWidth != width && !capsule.isLayoutRequested) {
+                changed = true
+            }
+        }
+        if (changed) {
+            capsule.requestLayout()
+            if (requestedWidth != null && parent != null && parent.width < width && !parent.isLayoutRequested) {
+                parent.requestLayout()
+            }
         }
         appliedWidth = width.takeUnless { it == nativeWidth }
     }

@@ -105,6 +105,9 @@ internal class CapsuleRuntime(
         }
         val binding = labels
         binding?.enforceNativeVisibility()
+        if (binding != null && !binding.nativeWhilePaused) {
+            binding.maintainNativeSizing()
+        }
         if (binding != null && (renderedShown != binding.target.capsule.isShown ||
                 !binding.nativeWhilePaused && (settings.artwork || settings.lyricTintEnabled) &&
                 session?.artworkChanged(binding.target.artwork) == true)) {
@@ -375,6 +378,21 @@ internal class CapsuleRuntime(
     fun containerLaidOut(container: Any) {
         val currentRoot = root ?: return
         if (settings.enabled && plugin?.belongs(container, currentRoot) == true) layoutChanged = true
+    }
+
+    fun prepareCapsuleMeasure(instance: Any) {
+        if (!settings.enabled) return
+        val capsule = instance as? ViewGroup ?: return
+        val active = media?.takeUnless { it.token == destroyedToken } ?: return
+        val watch = session ?: return
+        if (watch.token != active.token) return
+        if (watch.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE) return
+        val contract = plugin ?: return
+        if (!contract.hasOwner(capsule, active.key)) return
+        val normalWidth = capsuleWidthPixels(settings[CapsuleTuning.ISLAND_WIDTH], capsule.resources.displayMetrics.density)
+        if (capsule.minimumWidth != normalWidth) capsule.minimumWidth = normalWidth
+        val params = capsule.layoutParams
+        if (params != null && params.width != normalWidth) params.width = normalWidth
     }
 
     fun viewportHookInstalled() {

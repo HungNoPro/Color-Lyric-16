@@ -127,6 +127,7 @@ class SettingsActivity : ComponentActivity() {
     private var diagnosticsBusy by mutableStateOf(false)
     private var restartBusy by mutableStateOf(false)
     private var updateResult by mutableStateOf<GitHubUpdates.Result>(GitHubUpdates.Result.Idle)
+    private var updatePopupRelease by mutableStateOf<GitHubUpdates.Result.Latest?>(null)
     private val onboarding by lazy { getSharedPreferences("onboarding", MODE_PRIVATE) }
     private var providerStatuses by mutableStateOf<Map<LyricsProvider, Boolean>>(emptyMap())
     private var lockScreenLyricsConfirmed by mutableStateOf(false)
@@ -138,6 +139,9 @@ class SettingsActivity : ComponentActivity() {
         translationHelpHidden = onboarding.getBoolean(CapsuleBackup.TRANSLATION_HELP_HIDDEN, false)
         enableEdgeToEdge()
         val version = packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+        if (savedInstanceState == null) {
+            checkForUpdates(version, showPopupIfNewer = true)
+        }
         setContent {
             val state by app.state.collectAsState()
             val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
@@ -166,7 +170,13 @@ class SettingsActivity : ComponentActivity() {
                     onRestartSystemUi = ::restartSystemUi,
                     openRepository = { openWeb(GitHubUpdates.UPSTREAM_REPOSITORY_URL) },
                     updateResult = updateResult,
-                    checkForUpdates = { checkForUpdates(version) },
+                    updatePopupRelease = updatePopupRelease,
+                    onDismissUpdatePopup = { updatePopupRelease = null },
+                    onOpenUpdateRelease = { url ->
+                        updatePopupRelease = null
+                        openWeb(url)
+                    },
+                    checkForUpdates = { checkForUpdates(version, showPopupIfNewer = true) },
                     openReleases = { openWeb(GitHubUpdates.RELEASES_URL) },
                     copySupportGroup = ::copySupportGroup,
                     canExportDiagnostics = !diagnosticsBusy,
@@ -219,11 +229,15 @@ class SettingsActivity : ComponentActivity() {
         openWeb(provider.downloadPage)
     }
 
-    private fun checkForUpdates(version: PackageInfo) {
+    private fun checkForUpdates(version: PackageInfo, showPopupIfNewer: Boolean = false) {
         if (updateResult == GitHubUpdates.Result.Checking) return
         updateResult = GitHubUpdates.Result.Checking
         lifecycleScope.launch {
-            updateResult = GitHubUpdates.check(version.longVersionCode, version.versionName.orEmpty())
+            val result = GitHubUpdates.check(version.longVersionCode, version.versionName.orEmpty())
+            updateResult = result
+            if (showPopupIfNewer && result is GitHubUpdates.Result.Latest && result.comparison == GitHubUpdates.Comparison.NEWER) {
+                updatePopupRelease = result
+            }
         }
     }
 
@@ -361,6 +375,9 @@ private fun SettingsPage(
     onHideTranslationHelp: () -> Unit,
     openRepository: () -> Unit,
     updateResult: GitHubUpdates.Result,
+    updatePopupRelease: GitHubUpdates.Result.Latest?,
+    onDismissUpdatePopup: () -> Unit,
+    onOpenUpdateRelease: (String) -> Unit,
     checkForUpdates: () -> Unit,
     openReleases: () -> Unit,
     copySupportGroup: () -> Unit,
@@ -428,6 +445,14 @@ private fun SettingsPage(
             },
         )
     }
+    if (updatePopupRelease != null && !showProviderPrompt && !showRestartConfirmation && !showLockScreenPrompt) {
+        UpdateAvailableDialog(
+            release = updatePopupRelease,
+            currentVersion = version,
+            onDismiss = onDismissUpdatePopup,
+            onDownload = { onOpenUpdateRelease(updatePopupRelease.releaseUrl) },
+        )
+    }
     BackHandler(currentTab != SettingsTab.HOME) { selectTab(SettingsTab.HOME) }
     val background = CouiPageDefaults.themeColors().background
     FloatingScaffold(
@@ -488,6 +513,32 @@ private fun SettingsPage(
             }
         }
     }
+}
+
+@Composable
+private fun UpdateAvailableDialog(
+    release: GitHubUpdates.Result.Latest,
+    currentVersion: String,
+    onDismiss: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    val dark = isSystemInDarkTheme()
+    val header = stringResource(R.string.update_dialog_message, release.tag, currentVersion)
+    val body = if (release.releaseNotes.isNotBlank()) "$header\n\n${release.releaseNotes}" else header
+    CouiDialog(
+        onDismissRequest = onDismiss,
+        dark = dark,
+        placement = CouiDialogPlacement.Center,
+        title = stringResource(R.string.update_dialog_title),
+        message = body,
+        dismissAction = CouiDialogAction(stringResource(R.string.update_dialog_later), onClick = onDismiss),
+        confirmAction = CouiDialogAction(
+            text = stringResource(R.string.update_dialog_download),
+            style = CouiDialogActionStyle.Primary,
+            colors = CouiDialogDefaults.primaryActionColors(CouiTheme.colorSchemeFor(dark).accent),
+            onClick = onDownload,
+        ),
+    )
 }
 
 @Composable
