@@ -38,7 +38,7 @@ internal object OnlineLyricFetcher {
         val cleanTitle = sanitizeTrackTitle(rawTitle)
         if (cleanTitle.isEmpty()) return null
         val rawArtist = artist?.trim().orEmpty()
-        val cacheKey = sha256("lyrics_v3|$sourceMode|$cleanTitle|$rawArtist|${durationMs / 1000}")
+        val cacheKey = sha256("lyrics_v4|$sourceMode|$cleanTitle|$rawArtist|${durationMs / 1000}")
         readCache(context, cacheKey)?.let { cached ->
             val obj = try { JSONObject(cached) } catch (_: Exception) { null }
             if (obj != null && obj.has("payload")) {
@@ -47,7 +47,7 @@ internal object OnlineLyricFetcher {
         }
 
         val wordSyncFirst = listOf<Pair<String, () -> FetchedPayload?>>(
-            "APPLE_MUSIC" to { tryAppleMusic(rawTitle, cleanTitle, rawArtist) },
+            "APPLE_MUSIC" to { tryAppleMusic(rawTitle, cleanTitle, rawArtist, durationMs) },
             "BETTER_LYRICS" to { tryBetterLyrics(rawTitle, cleanTitle, rawArtist) },
             "LRCLIB" to { tryLrclib(rawTitle, cleanTitle, rawArtist, durationMs) },
             "KUGOU" to { tryKugou(rawTitle, cleanTitle, rawArtist, durationMs) },
@@ -170,8 +170,9 @@ internal object OnlineLyricFetcher {
         return result
     }
 
-    // 0. Apple Music (iTunes track lookup + Paxsenix TTML/syllables, fallback to Apple Music TTML mirror)
-    private fun tryAppleMusic(rawTitle: String, cleanTitle: String, artist: String): FetchedPayload? {
+    // 0. Apple Music word-by-word (LyricsPlus v2 primary -> iTunes + Paxsenix fallback)
+    private fun tryAppleMusic(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
+        tryLyricsPlus(rawTitle, cleanTitle, artist, durationMs)?.let { return it }
         return try {
             val primaryArtist = primaryArtistName(artist)
             val term = if (primaryArtist.isNotBlank()) "$cleanTitle $primaryArtist" else cleanTitle
@@ -383,6 +384,93 @@ internal object OnlineLyricFetcher {
             Log.w(TAG, "Google Translate failed: ${e.message}")
             null
         }
+    }
+
+    private fun tryLyricsPlus(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
+        val primaryArtist = primaryArtistName(artist)
+        val durSec = (durationMs / 1000L).takeIf { it > 0L }
+        val attempts = buildList {
+            if (artist.isNotBlank()) add(artist to durSec)
+            if (primaryArtist.isNotBlank() && (primaryArtist != artist || durSec != null)) add(primaryArtist to null)
+            if (artist.isBlank()) add("" to durSec)
+        }.distinct()
+
+        for ((candArtist, candDur) in attempts) {
+            try {
+                val sb = StringBuilder("https://lyricsplus.prjktla.my.id/v2/lyrics/get?title=${enc(cleanTitle)}")
+                if (candArtist.isNotBlank()) sb.append("&artist=${enc(candArtist)}")
+                if (candDur != null) sb.append("&duration=$candDur")
+                sb.append("&source=apple,lyricsplus,musixmatch-word,spotify")
+                val body = httpGet(sb.toString()) ?: continue
+                val json = JSONObject(body)
+                val lyricsArr = json.optJSONArray("lyrics") ?: continue
+                if (lyricsArr.length() == 0) continue
+                val elrc = lyricsPlusV2ToEnhancedLrc(lyricsArr)
+                if (elrc.isBlank()) continue
+                val upstreamSrc = json.optJSONObject("metadata")?.optString("source").orEmpty().lowercase(Locale.ROOT)
+                val sourceTag = when {
+                    upstreamSrc.contains("apple") -> "apple-music"
+                    upstreamSrc.isNotBlank() -> "lyricsplus-$upstreamSrc"
+                    else -> "lyricsplus"
+                }
+                val payload = buildLrcPayload(rawTitle, artist, elrc, durationMs)
+                Log.i(TAG, "Fetched word-sync lyrics from LyricsPlus ($sourceTag, type=${json.optString("type")}, lines=${lyricsArr.length()})")
+                return FetchedPayload(sourceTag, payload)
+            } catch (e: Exception) {
+                Log.w(TAG, "LyricsPlus failed ($candArtist): ${e.message}")
+            }
+        }
+        return null
+    }
+
+    private fun lyricsPlusV2ToEnhancedLrc(lyrics: JSONArray): String {
+        val out = StringBuilder()
+        for (i in 0 until lyrics.length()) {
+            val lineObj = lyrics.optJSONObject(i) ?: continue
+            val lineStart = lineObj.optLong("time", -1L)
+            if (lineStart < 0L) continue
+            val lineDur = lineObj.optLong("duration", 0L).coerceAtLeast(0L)
+            val lineEnd = lineStart + lineDur
+            val syllabus = lineObj.optJSONArray("syllabus")
+            if (syllabus != null && syllabus.length() > 0) {
+                data class Syl(val start: Long, val end: Long, val text: String)
+                val items = ArrayList<Syl>(syllabus.length())
+                for (j in 0 until syllabus.length()) {
+                    val s = syllabus.optJSONObject(j) ?: continue
+                    if (s.optBoolean("isBackground", false)) continue
+                    val wText = s.optString("text")
+                    if (wText.isEmpty()) continue
+                    val wStart = s.optLong("time", -1L)
+                    if (wStart < 0L) continue
+                    val wDur = s.optLong("duration", 0L).coerceAtLeast(0L)
+                    items += Syl(wStart, wStart + wDur, wText)
+                }
+                if (items.isNotEmpty()) {
+                    val rowStart = minOf(lineStart, items.first().start)
+                    val row = StringBuilder()
+                    var lastEnd = rowStart
+                    for (j in items.indices) {
+                        val cur = items[j]
+                        row.append(formatAngleTime(cur.start)).append(cur.text)
+                        val nextStart = items.getOrNull(j + 1)?.start
+                        if (cur.end > cur.start && nextStart != null && cur.end + 60L < nextStart) {
+                            row.append(formatAngleTime(cur.end))
+                        }
+                        if (cur.end > lastEnd) lastEnd = cur.end
+                    }
+                    val finalEnd = maxOf(lineEnd, lastEnd)
+                    out.append(formatLrcTime(rowStart)).append(row)
+                    if (finalEnd > rowStart) out.append(formatAngleTime(finalEnd))
+                    out.append('\n')
+                    continue
+                }
+            }
+            val plain = lineObj.optString("text").trim()
+            if (plain.isNotEmpty()) {
+                out.append(formatLrcTime(lineStart)).append(plain).append('\n')
+            }
+        }
+        return out.toString()
     }
 
     private fun paxsenixContentToEnhancedLrc(content: JSONArray): String {
