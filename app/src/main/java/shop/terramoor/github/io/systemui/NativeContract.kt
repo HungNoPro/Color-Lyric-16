@@ -327,6 +327,18 @@ internal object NativeContract {
         val cos16FluidEvent = optional("ColorOS 16 fluid event timeout guard", optionalMissing) {
             Cos16FluidEvent(loader)
         }
+        val cos16CapsuleTimer = optional("ColorOS 16 capsule 5-min timer guard", optionalMissing) {
+            Cos16CapsuleTimer(loader)
+        }
+
+        class Cos16CapsuleTimer(loader: ClassLoader) {
+            private val timerClass = loader.requiredClass("p5.u")
+            private val fn1Class = loader.requiredClass("kotlin.jvm.functions.Function1")
+            private val bubbleCallbackClass = loader.requiredClass("f4.c")
+            val schedule = timerClass.method("h", Void.TYPE, timerClass, String::class.java, Long::class.javaPrimitiveType!!, fn1Class)
+            val reset = timerClass.method("c", Void.TYPE, String::class.java, Long::class.javaPrimitiveType!!)
+            val bubbleTimeout = bubbleCallbackClass.method("invoke", Any::class.java, Any::class.java)
+        }
 
         class Cos16FluidEvent(loader: ClassLoader) {
             private val eventBase = loader.requiredClass("b5.a")

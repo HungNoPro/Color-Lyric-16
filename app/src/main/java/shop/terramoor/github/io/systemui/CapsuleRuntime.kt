@@ -176,6 +176,13 @@ internal class CapsuleRuntime(
         return true
     }
 
+    fun shouldBlockMediaCapsuleTimer(): Boolean {
+        if (!settings.enabled || !settings.preventCapsuleCollapse) return false
+        val activeMedia = media
+        if (activeMedia != null && !settings.allowsApp(activeMedia.owner)) return false
+        return true
+    }
+
     fun bindAodMediaViews(title: android.widget.TextView?, artist: android.widget.TextView?) = onMain("AOD media bind") {
         if (title != null) aodTitleView = WeakReference(title)
         if (artist != null) aodArtistView = WeakReference(artist)

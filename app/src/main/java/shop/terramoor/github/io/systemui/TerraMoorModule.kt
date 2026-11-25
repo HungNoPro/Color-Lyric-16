@@ -328,6 +328,37 @@ class TerraMoorModule : XposedModule() {
                     }
                 }
             } }
+            plugin.cos16CapsuleTimer?.let { timer -> installOptional(hooks, "ColorOS 16 capsule 5-min timer guard hook") {
+                val bubbleHandle = hook(timer.bubbleTimeout).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    if (runtime.shouldPreventCapsuleCollapse()) {
+                        diagnostics?.note("Blocked ColorOS 16 capsuleToBubble mini-shrink callback")
+                        null
+                    } else {
+                        chain.proceed()
+                    }
+                }
+                hooks += bubbleHandle
+                val resetHandle = hook(timer.reset).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    val key = chain.args.firstOrNull() as? String
+                    val isBubbleOrMedia = key == "capsuleToBubble" || (key != null && key.startsWith("268452006"))
+                    if (isBubbleOrMedia && runtime.shouldPreventCapsuleCollapse()) {
+                        diagnostics?.note("Blocked ColorOS 16 5-min capsule timer reset ($key)")
+                        null
+                    } else {
+                        chain.proceed()
+                    }
+                }
+                hooks += resetHandle
+                hook(timer.schedule).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    val key = chain.args.getOrNull(1) as? String
+                    if (key != null && key.startsWith("268452006") && runtime.shouldBlockMediaCapsuleTimer()) {
+                        diagnostics?.note("Blocked ColorOS 16 5-min capsule timer schedule ($key)")
+                        null
+                    } else {
+                        chain.proceed()
+                    }
+                }
+            } }
             return hooks
         } catch (failure: Throwable) {
             hooks.forEach { it.unhook() }
