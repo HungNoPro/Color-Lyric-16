@@ -10,7 +10,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.hungnopro.coslrc16"
+        applicationId = "io.github.hungnopro.coslrc16"
         minSdk = 34
         targetSdk = 37
         versionCode = 5
@@ -34,7 +34,7 @@ android {
     productFlavors {
         create("local") {
             dimension = "distribution"
-            applicationId = "com.hungnopro.coslrc16"
+            applicationId = "io.github.hungnopro.coslrc16"
         }
         create("public") {
             dimension = "distribution"
