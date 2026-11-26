@@ -103,7 +103,6 @@ internal data class CapsuleSettings(
     val translateTargetLang: TranslateTargetLang = TranslateTargetLang.SYSTEM,
     val lockscreenBridge: Boolean = true,
     val aodUnlockWhitelist: Boolean = true,
-    val preventCapsuleCollapse: Boolean = true,
     val autoClearCache: Boolean = false,
     val appWhitelistEnabled: Boolean = false,
     val appWhitelistPackages: Set<String> = emptySet(),
@@ -165,7 +164,6 @@ internal data class CapsuleSettings(
         const val TRANSLATE_TARGET_LANG = "translate_target_lang"
         const val LOCKSCREEN_BRIDGE = "lockscreen_bridge"
         const val AOD_UNLOCK_WHITELIST = "aod_unlock_whitelist"
-        const val PREVENT_CAPSULE_COLLAPSE = "prevent_capsule_collapse"
         const val AUTO_CLEAR_CACHE = "auto_clear_cache"
         const val APP_WHITELIST_ENABLED = "app_whitelist_enabled"
         const val APP_WHITELIST_PACKAGES = "app_whitelist_packages"
@@ -208,7 +206,6 @@ internal data class CapsuleSettings(
                 translateTargetLang = prefs.enumValue(TRANSLATE_TARGET_LANG, defaults.translateTargetLang),
                 lockscreenBridge = prefs.getBoolean(LOCKSCREEN_BRIDGE, defaults.lockscreenBridge),
                 aodUnlockWhitelist = prefs.getBoolean(AOD_UNLOCK_WHITELIST, defaults.aodUnlockWhitelist),
-                preventCapsuleCollapse = prefs.getBoolean(PREVENT_CAPSULE_COLLAPSE, defaults.preventCapsuleCollapse),
                 autoClearCache = prefs.getBoolean(AUTO_CLEAR_CACHE, defaults.autoClearCache),
                 appWhitelistEnabled = prefs.getBoolean(APP_WHITELIST_ENABLED, defaults.appWhitelistEnabled),
                 appWhitelistPackages = decodePackageSet(prefs.getString(APP_WHITELIST_PACKAGES, null)),

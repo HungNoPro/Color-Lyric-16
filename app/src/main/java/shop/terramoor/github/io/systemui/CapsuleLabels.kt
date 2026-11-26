@@ -18,7 +18,10 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /** Draws lyrics over the OEM capsule surface and leaves the OEM controls in their own views. */
-internal class CapsuleLabels(val target: NativeContract.Target) {
+internal class CapsuleLabels(
+    val target: NativeContract.Target,
+    initialMetrics: Pair<Int, Int>? = null,
+) {
     private val capsule = target.capsule
     private val density = capsule.resources.displayMetrics.density
     private val strip = CapsuleLyricStrip(density)
@@ -51,12 +54,13 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
     private val redrawContent = Runnable { if (capsule.isShown) capsule.invalidate() }
     private var displaySettings: CapsuleSettings? = null
     private var sizedParams: ViewGroup.LayoutParams? = null
-    private var nativeWidth = 0
-    private var nativeMinimumWidth = capsule.minimumWidth
+    private var nativeWidth = initialMetrics?.first ?: target.capsule.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
+    private var nativeMinimumWidth = initialMetrics?.second ?: capsule.minimumWidth
     private var appliedWidth: Int? = null
     private val viewport = CapsuleVisualViewport(target)
     private var viewportStartedAt: Long? = null
     private var viewportPosition: Long? = null
+    private var pauseCollapseStartedAt: Long? = null
     private val artworkBackground = CapsuleArtworkBackground()
     private val area = RectF()
     private val artworkArea = RectF()
@@ -75,12 +79,16 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
     }
     var nativeWhilePaused = false
         private set
+    val isCollapsingForPause: Boolean get() = pauseCollapseStartedAt != null
 
     fun render(
         frame: LyricFrame?, settings: CapsuleSettings, artwork: Bitmap?,
         clock: PlaybackClock? = null, ink: LyricInk = LyricInk.WHITE, trackIdentity: Any? = null,
     ) {
-        if (displaySettings == null) nativeMinimumWidth = capsule.minimumWidth
+        if (pauseCollapseStartedAt != null) {
+            pauseCollapseStartedAt = null
+            suspendViewport()
+        }
         nativeWhilePaused = false
         val line = if (frame != null && !frame.isTrackInfo && frame.countdown == null &&
             trackIdentity != null && trackIdentity === displayTrackIdentity &&
@@ -177,6 +185,49 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
         return true
     }
 
+    fun beginRestoreForPause(): Boolean {
+        if (nativeWhilePaused) return false
+        if (displaySettings == null || !capsule.isShown || capsule.width <= 0 || (displayLine == null && artwork == null)) {
+            restoreForPause()
+            return false
+        }
+        if (pauseCollapseStartedAt == null) {
+            pauseCollapseStartedAt = SystemClock.elapsedRealtime()
+            capsule.postInvalidateOnAnimation()
+        }
+        return true
+    }
+
+    fun preparePauseCollapse(now: Long): Boolean {
+        val startedAt = pauseCollapseStartedAt ?: return false
+        val width = capsule.width
+        if (!capsule.isShown || width <= 0) {
+            pauseCollapseStartedAt = null
+            restoreForPause()
+            return false
+        }
+        val rawT = ((now - startedAt).toFloat() / PAUSE_COLLAPSE_DURATION_MS).coerceIn(0f, 1f)
+        if (rawT >= 1f) {
+            pauseCollapseStartedAt = null
+            restoreForPause()
+            return false
+        }
+        val ease = 1f - (1f - rawT) * (1f - rawT) * (1f - rawT)
+        val settings = displaySettings
+        val showCover = settings?.showCover != false
+        val showWaveform = settings?.showWaveform != false
+        val lens = resolveCamera(includeWindowFallback = true)
+        val cameraWidth = (lens?.radiusX?.times(2f) ?: (32f * density))
+        val coverSlot = if (showCover) maxOf(target.artwork.width.toFloat(), 20f * density) + 14f * density else 12f * density
+        val waveSlot = if (showWaveform) maxOf(target.waveform.width.toFloat(), 20f * density) + 14f * density else 12f * density
+        val compactTarget = (coverSlot + cameraWidth + waveSlot).coerceIn(88f * density, width.toFloat())
+        val maxInset = ((width - compactTarget) / 2f).coerceAtLeast(0f)
+        val inset = (maxInset * ease).roundToInt().coerceAtMost((width - 1) / 2)
+        viewport.apply(inset, moveLeading = showCover, moveTrailing = showWaveform, followEdge = false)
+        capsule.postInvalidateOnAnimation()
+        return true
+    }
+
     fun suspendViewport() {
         viewport.restore()
         viewportStartedAt = null
@@ -217,11 +268,29 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
         clip.rewind()
         val radius = area.height() / 2f
         clip.addRoundRect(area, radius, radius, Path.Direction.CW)
+        val collapseT = pauseCollapseStartedAt?.let {
+            ((SystemClock.elapsedRealtime() - it).toFloat() / PAUSE_COLLAPSE_DURATION_MS).coerceIn(0f, 1f)
+        }
         val save = canvas.save()
         try {
             canvas.clipPath(clip)
-            artwork?.takeUnless { it.isRecycled }?.let {
-                artworkBackground.draw(canvas, it, artworkArea, area, dimAlpha)
+            artwork?.takeUnless { it.isRecycled }?.let { bmp ->
+                val artAlpha = if (collapseT == null) 1f else ((1f - collapseT) / 0.55f).coerceIn(0f, 1f)
+                if (artAlpha >= 0.99f) {
+                    artworkBackground.draw(canvas, bmp, artworkArea, area, dimAlpha)
+                } else if (artAlpha > 0.01f) {
+                    val layer = canvas.saveLayerAlpha(area, (artAlpha * 255).roundToInt())
+                    try {
+                        artworkBackground.draw(canvas, bmp, artworkArea, area, dimAlpha)
+                    } finally {
+                        canvas.restoreToCount(layer)
+                    }
+                }
+            }
+            val lyricOpacity = if (collapseT == null) 1f else (1f - collapseT * 2.2f).coerceIn(0f, 1f)
+            if (collapseT != null && lyricOpacity <= 0.01f) {
+                capsule.postInvalidateOnAnimation()
+                return "PAUSE_COLLAPSE"
             }
             val line = displayLine ?: return "ARTWORK_ONLY"
             val settings = displaySettings ?: return "ARTWORK_ONLY"
@@ -237,11 +306,13 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
             val settled = animatedWidth == null && abs(width - capsule.measuredWidth) <= 1
             val redrawDelay = strip.draw(
                 canvas, left, area.top, right, area.bottom,
-                lens, position, artworkArea = artworkArea,
+                lens, position, opacity = lyricOpacity, artworkArea = artworkArea,
                 trackInfoMarquee = trackInfoMarquee, trackInfoSettled = settled,
             )
             capsule.removeCallbacks(redrawContent)
-            if (line.isTrackInfo) {
+            if (collapseT != null) {
+                capsule.postInvalidateOnAnimation()
+            } else if (line.isTrackInfo) {
                 if (capsule.windowVisibility == View.VISIBLE && redrawDelay != null) {
                     if (redrawDelay == 0L) capsule.postInvalidateOnAnimation()
                     else capsule.postDelayed(redrawContent, redrawDelay)
@@ -326,14 +397,10 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
         val params = capsule.layoutParams ?: return
         if (params !== sizedParams) {
             sizedParams = params
-            nativeWidth = params.width
+            if (requestedWidth != null && appliedWidth == null && params.width <= 0) {
+                nativeWidth = params.width
+            }
             appliedWidth = null
-        } else if (appliedWidth == null && params.width != nativeWidth) {
-            nativeWidth = params.width
-        }
-        if (requestedWidth == null && appliedWidth == null) {
-            if (capsule.minimumWidth != nativeMinimumWidth) capsule.minimumWidth = nativeMinimumWidth
-            return
         }
         val width = requestedWidth ?: nativeWidth
         val minimum = if (requestedWidth == null) nativeMinimumWidth else width
@@ -367,7 +434,7 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
                 parent.requestLayout()
             }
         }
-        appliedWidth = width.takeUnless { it == nativeWidth }
+        appliedWidth = if (requestedWidth == null) null else width.takeUnless { it == nativeWidth }
     }
 
     private fun setFillerWidth(width: Int) {
@@ -397,13 +464,16 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
     }
 
     fun restoreForPause() {
+        pauseCollapseStartedAt = null
         nativeWhilePaused = true
         close()
     }
 
     fun close() {
+        pauseCollapseStartedAt = null
         suspendViewport()
         restoreTrailingSection()
+        updateCapsuleWidth(null)
         if (displaySettings == null) return
         displaySettings = null
         capsule.removeCallbacks(redrawContent)
@@ -413,7 +483,6 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
         rightSectionVisibility?.restore()
         titleStockVisibility?.restore()
         translationStockVisibility?.restore()
-        updateCapsuleWidth(null)
         clearFiller()
         displayLine = null
         displayTrackIdentity = null
@@ -425,4 +494,8 @@ internal class CapsuleLabels(val target: NativeContract.Target) {
     }
 
     private fun alpha(percent: Int): Int = (percent * 255 + 50) / 100
+
+    private companion object {
+        const val PAUSE_COLLAPSE_DURATION_MS = 280L
+    }
 }

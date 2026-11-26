@@ -166,8 +166,9 @@
     <string name="lockscreen_bridge_summary">Bơm lời bài hát trực tiếp vào màn hình khoá &amp; AOD gốc của ColorOS 16</string>
     <string name="aod_unlock_whitelist">Mở khoá whitelist AOD</string>
     <string name="aod_unlock_whitelist_summary">Cho phép mọi trình phát nhạc hiển thị trên AOD (bỏ giới hạn chỉ Spotify)</string>
-    <string name="prevent_capsule_collapse">Chặn thu nhỏ viên thuốc</string>
-    <string name="prevent_capsule_collapse_summary">Giữ viên thuốc Fluid Cloud luôn mở rộng, không tự thu gọn sau một thời gian</string>
+    <string name="prevent_capsule_collapse">Chặn tự thu nhỏ viên nang</string>
+    <string name="prevent_capsule_collapse_summary">Mở Cài đặt ColorOS: Thông báo và cài đặt nhanh &gt; Cảnh báo trực tiếp &gt; tắt Cảnh báo trực tiếp thu nhỏ</string>
+    <string name="open_live_alerts_fallback">Vào Cài đặt &gt; Thông báo và cài đặt nhanh &gt; Cảnh báo trực tiếp &gt; Cảnh báo trực tiếp thu nhỏ</string>
     <string name="app_whitelist_title">Danh sách ứng dụng áp dụng</string>
     <string name="app_whitelist_summary">Chỉ áp dụng lời nhạc Fluid Cloud cho các ứng dụng đã chọn</string>
     <string name="app_whitelist_select">Chọn ứng dụng được phép</string>

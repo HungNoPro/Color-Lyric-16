@@ -82,6 +82,7 @@ internal class CapsuleRuntime(
     private var mediaCardScene: MediaCardScene? = null
     private val interludeStatusBarSpace = InterludeStatusBarSpace()
     private val centeredMedia = WeakHashMap<ViewGroup, String>()
+    private val originalCapsuleMetrics = WeakHashMap<ViewGroup, Pair<Int, Int>>()
     private val centerLocation = IntArray(2)
     private var renderedShown: Boolean? = null
     private var layoutChanged = false
@@ -105,18 +106,21 @@ internal class CapsuleRuntime(
         }
         val binding = labels
         binding?.enforceNativeVisibility()
-        if (binding != null && !binding.nativeWhilePaused && !binding.hasInterludeViewport) {
+        if (binding != null && !binding.nativeWhilePaused && !binding.hasInterludeViewport && !binding.isCollapsingForPause) {
             binding.maintainNativeSizing()
         }
-        if (binding != null && (renderedShown != binding.target.capsule.isShown ||
+        if (binding != null && binding.isCollapsingForPause) {
+            protect("Capsule pause collapse") { binding.preparePauseCollapse(SystemClock.elapsedRealtime()) }
+        }
+        if (binding != null && !binding.isCollapsingForPause && (renderedShown != binding.target.capsule.isShown ||
                 !binding.nativeWhilePaused && (settings.artwork || settings.lyricTintEnabled) &&
                 session?.artworkChanged(binding.target.artwork) == true)) {
             protect("Capsule visibility or artwork", ::render)
         }
-        val viewportBinding = labels?.takeIf { it.hasInterludeViewport }
+        val viewportBinding = labels?.takeIf { it.hasInterludeViewport && !it.isCollapsingForPause }
         if (viewportBinding != null) {
             protect("Capsule viewport") { prepareViewport(viewportBinding) }
-        } else {
+        } else if (labels?.isCollapsingForPause != true) {
             updateInterludeStatusBarSpace(compact = false)
         }
         true
@@ -166,22 +170,6 @@ internal class CapsuleRuntime(
     fun isLockscreenBridgeEnabled(): Boolean = settings.enabled && settings.lockscreenBridge
 
     fun isAodWhitelistUnlocked(): Boolean = settings.enabled && settings.aodUnlockWhitelist
-
-    fun shouldPreventCapsuleCollapse(): Boolean {
-        if (!settings.enabled || !settings.preventCapsuleCollapse) return false
-        val activeMedia = media ?: return false
-        if (!settings.allowsApp(activeMedia.owner)) return false
-        val activeSession = session ?: return false
-        if (activeSession.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE) return false
-        return true
-    }
-
-    fun shouldBlockMediaCapsuleTimer(): Boolean {
-        if (!settings.enabled || !settings.preventCapsuleCollapse) return false
-        val activeMedia = media
-        if (activeMedia != null && !settings.allowsApp(activeMedia.owner)) return false
-        return true
-    }
 
     fun bindAodMediaViews(title: android.widget.TextView?, artist: android.widget.TextView?) = onMain("AOD media bind") {
         if (title != null) aodTitleView = WeakReference(title)
@@ -389,17 +377,43 @@ internal class CapsuleRuntime(
         if (settings.enabled && plugin?.belongs(container, currentRoot) == true) layoutChanged = true
     }
 
+    private fun restoreCapsuleMetrics(capsule: ViewGroup) {
+        val orig = originalCapsuleMetrics[capsule] ?: return
+        val (origWidth, origMinWidth) = orig
+        if (capsule.minimumWidth != origMinWidth) capsule.minimumWidth = origMinWidth
+        val params = capsule.layoutParams
+        if (params != null && params.width != origWidth) params.width = origWidth
+    }
+
     fun prepareCapsuleMeasure(instance: Any) {
-        if (!settings.enabled) return
         val capsule = instance as? ViewGroup ?: return
-        val active = media?.takeUnless { it.token == destroyedToken } ?: return
-        if (!settings.allowsApp(active.owner)) return
+        if (!settings.enabled) {
+            restoreCapsuleMetrics(capsule)
+            return
+        }
+        val active = media?.takeUnless { it.token == destroyedToken } ?: run {
+            restoreCapsuleMetrics(capsule)
+            return
+        }
+        if (!settings.allowsApp(active.owner)) {
+            restoreCapsuleMetrics(capsule)
+            return
+        }
         val watch = session ?: return
         if (watch.token != active.token) return
-        if (watch.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE) return
+        if (watch.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE && labels?.isCollapsingForPause != true) {
+            restoreCapsuleMetrics(capsule)
+            return
+        }
         val contract = plugin ?: return
         if (!contract.hasOwner(capsule, active.key)) return
         val normalWidth = capsuleWidthPixels(settings[CapsuleTuning.ISLAND_WIDTH], capsule.resources.displayMetrics.density)
+        if (capsule !in originalCapsuleMetrics) {
+            val rawWidth = capsule.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
+            val origWidth = if (rawWidth >= normalWidth) ViewGroup.LayoutParams.WRAP_CONTENT else rawWidth
+            val origMinWidth = if (capsule.minimumWidth >= normalWidth) 0 else capsule.minimumWidth
+            originalCapsuleMetrics[capsule] = origWidth to origMinWidth
+        }
         if (capsule.minimumWidth != normalWidth) capsule.minimumWidth = normalWidth
         val params = capsule.layoutParams
         if (params != null && params.width != normalWidth) params.width = normalWidth
@@ -525,10 +539,15 @@ internal class CapsuleRuntime(
     }
 
     fun draw(instance: Any, canvas: Canvas) {
-        val binding = labels ?: return
-        if (binding.nativeWhilePaused) return
         val contract = plugin ?: return
         val candidate = media ?: return
+        if (labels == null && settings.enabled && instance is ViewGroup &&
+            settings.allowsApp(candidate.owner) && contract.hasOwner(instance, candidate.key)) {
+            // Re-bind synchronously on the very first draw after shade/card dismissal so no black frame flashes.
+            protect("Capsule immediate draw bind") { refreshTarget(forceRender = true) }
+        }
+        val binding = labels ?: return
+        if (binding.nativeWhilePaused) return
         val capsule = binding.target.capsule
         if (capsule !== instance || session?.token != candidate.token || !contract.hasOwner(capsule, candidate.key)) return
         val animatedWidth = contract.animatedDrawingWidth(capsule)
@@ -865,7 +884,11 @@ internal class CapsuleRuntime(
         val newBinding = labels?.target != target
         if (newBinding) {
             clearLabels()
-            labels = CapsuleLabels(target)
+            if (target.capsule !in originalCapsuleMetrics) {
+                val origWidth = target.capsule.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
+                originalCapsuleMetrics[target.capsule] = origWidth to target.capsule.minimumWidth
+            }
+            labels = CapsuleLabels(target, originalCapsuleMetrics[target.capsule])
             Log.i(TAG, "Verified native media capsule label slots")
             fun node(view: View) = "${view.javaClass.name}(${view.width}x${view.height},shown=${view.isShown})"
             diagnostics.note("Native capsule bound: capsule=${node(target.capsule)}, titleFrame=${node(target.title.frame)}, title=${node(target.title.stock)}")
@@ -928,7 +951,9 @@ internal class CapsuleRuntime(
         if (watch.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE) {
             centeredMedia.remove(binding.target.capsule)
             updateInterludeStatusBarSpace(compact = false)
-            binding.restoreForPause()
+            if (!binding.isCollapsingForPause && !binding.nativeWhilePaused) {
+                binding.beginRestoreForPause()
+            }
             setLyricTick(null)
             tintDrawFrame = null
             updatePauseOwner()

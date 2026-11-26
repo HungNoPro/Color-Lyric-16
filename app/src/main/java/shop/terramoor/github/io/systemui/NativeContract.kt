@@ -324,32 +324,6 @@ internal object NativeContract {
         val statusBarSpace = optional("status bar placeholder width", optionalMissing) {
             StatusBarSpace(loader)
         }
-        val cos16FluidEvent = optional("ColorOS 16 fluid event timeout guard", optionalMissing) {
-            Cos16FluidEvent(loader)
-        }
-        val cos16CapsuleTimer = optional("ColorOS 16 capsule 5-min timer guard", optionalMissing) {
-            Cos16CapsuleTimer(loader)
-        }
-
-        class Cos16CapsuleTimer(loader: ClassLoader) {
-            private val timerClass = loader.requiredClass("p5.u")
-            private val fn1Class = loader.requiredClass("kotlin.jvm.functions.Function1")
-            private val bubbleCallbackClass = loader.requiredClass("f4.c")
-            val schedule = timerClass.method("h", Void.TYPE, timerClass, String::class.java, Long::class.javaPrimitiveType!!, fn1Class)
-            val reset = timerClass.method("c", Void.TYPE, String::class.java, Long::class.javaPrimitiveType!!)
-            val bubbleTimeout = bubbleCallbackClass.method("invoke", Any::class.java, Any::class.java)
-        }
-
-        class Cos16FluidEvent(loader: ClassLoader) {
-            private val eventBase = loader.requiredClass("b5.a")
-            private val eventType = loader.requiredClass("j5.d")
-            private val dispatcher = loader.requiredClass("m7.l0")
-            val dispatch = dispatcher.method("d1", Void.TYPE, eventType)
-            private val getName = eventBase.method("getName", String::class.java)
-
-            fun eventName(event: Any?): String? =
-                if (event != null && eventBase.isInstance(event)) getName.invoke(event) as? String else null
-        }
 
         init {
             if (keys.isEmpty()) throw Mismatch("no instance String fields on ${item.returnType.name}")

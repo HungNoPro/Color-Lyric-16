@@ -189,7 +189,8 @@
     <string name="aod_unlock_whitelist">Unlock AOD player whitelist</string>
     <string name="aod_unlock_whitelist_summary">Allow all music players on AOD (removes Spotify-only limit)</string>
     <string name="prevent_capsule_collapse">Prevent capsule auto-shrink</string>
-    <string name="prevent_capsule_collapse_summary">Keep the Fluid Cloud pill expanded instead of collapsing after a timeout</string>
+    <string name="prevent_capsule_collapse_summary">Open ColorOS Settings: Notifications &amp; Quick Settings &gt; Live Alerts &gt; Minimize Live Alerts</string>
+    <string name="open_live_alerts_fallback">Open Settings &gt; Notifications &amp; Quick Settings &gt; Live Alerts &gt; Minimize Live Alerts</string>
     <string name="auto_clear_lyric_cache">Auto-clear lyric cache</string>
     <string name="auto_clear_lyric_cache_summary">Automatically prune cached lyrics older than 7 days or over 20 MB</string>
     <string name="clear_lyric_cache">Clear lyric &amp; translation cache</string>

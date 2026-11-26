@@ -35,6 +35,7 @@ private const val LONG_WORD_GLOW_RADIUS_DP = 1.5f
 private const val LONG_WORD_GLOW_ALPHA = 0.55f
 private const val UNPLAYED_ALPHA = 0.55f
 internal const val LYRIC_MOTION_DURATION_MS = 260L
+private const val INTRO_SPLIT_DURATION_MS = 420L
 
 /** Draws each lyric lane once, with a fixed mask over the camera. */
 internal class CapsuleLyricStrip(private val density: Float) {
@@ -50,12 +51,23 @@ internal class CapsuleLyricStrip(private val density: Float) {
     private val introDots = CapsuleIntroDots()
     private var introColor = 0
     private var introOpacity = 1f
+    private var introSplitPending = false
+    private var introSplitStartMs = 0L
     private var avoidCameraWords = false
     private val lanes = listOf(firstRow, secondRow, priorFirstRow, priorSecondRow)
 
     fun paintDiagnostics() = "first=${firstRow.paintDiagnostics()}, second=${secondRow.paintDiagnostics()}, cameraFadePx=$fadePx"
 
     fun update(frame: LyricFrame?, settings: CapsuleSettings, ink: LyricInk = LyricInk.WHITE) {
+        val wasIntro = this.frame?.countdown?.isIntro == true
+        val isIntro = frame?.countdown?.isIntro == true
+        if (isIntro && !wasIntro) {
+            introSplitPending = true
+            introSplitStartMs = 0L
+        } else if (!isIntro) {
+            introSplitPending = false
+            introSplitStartMs = 0L
+        }
         this.frame = frame
         motion = settings.motion
         lyricAlignment = settings.lyricAlignment
@@ -105,13 +117,62 @@ internal class CapsuleLyricStrip(private val density: Float) {
             val dotsLeft = if (seam == null) (if (main.width > 0f) fallbackSplit else left) else lensRight
             val elapsed = (time - countdown.startMs).coerceAtLeast(0L)
             val duration = countdown.endMs - countdown.startMs
+            var splitEase = 1f
+            var splitAnimating = false
+            if (countdown.isIntro) {
+                if (introSplitPending) {
+                    introSplitPending = false
+                    introSplitStartMs = android.os.SystemClock.elapsedRealtime()
+                }
+                if (introSplitStartMs > 0L) {
+                    val splitElapsed = (android.os.SystemClock.elapsedRealtime() - introSplitStartMs).coerceAtLeast(0L)
+                    val rawT = (splitElapsed.toFloat() / INTRO_SPLIT_DURATION_MS).coerceIn(0f, 1f)
+                    if (rawT >= 1f) {
+                        introSplitStartMs = 0L
+                    } else {
+                        splitEase = 1f - (1f - rawT) * (1f - rawT) * (1f - rawT)
+                        splitAnimating = true
+                    }
+                }
+            }
             val save = canvas.save()
             try {
                 if (!canvas.clipRect(left, top, right, bottom)) return null
-                val infoDelay = if (countdown.isIntro) drawIntroTrack(canvas, left, top, infoRight, bottom,
-                    main, second, elapsed, duration, alpha, textureArea, offsetY) else null
-                return introDots.draw(canvas, dotsLeft, top, right, bottom, density,
-                    elapsed, duration, countdown.isIntro, introColor, alpha * introOpacity, offsetY) ?: infoDelay
+                val infoDelay = if (countdown.isIntro) {
+                    if (splitAnimating) {
+                        val leftSave = canvas.save()
+                        try {
+                            if (canvas.clipRect(left, top, infoRight, bottom)) {
+                                val shiftX = (infoRight - left) * 0.65f * (1f - splitEase)
+                                canvas.translate(shiftX, 0f)
+                                drawIntroTrack(canvas, left, top, infoRight, bottom,
+                                    main, second, elapsed, duration, alpha * (0.2f + 0.8f * splitEase), textureArea, offsetY)
+                            } else null
+                        } finally {
+                            canvas.restoreToCount(leftSave)
+                        }
+                    } else {
+                        drawIntroTrack(canvas, left, top, infoRight, bottom,
+                            main, second, elapsed, duration, alpha, textureArea, offsetY)
+                    }
+                } else null
+                val dotsDelay = if (splitAnimating) {
+                    val rightSave = canvas.save()
+                    try {
+                        if (canvas.clipRect(dotsLeft, top, right, bottom)) {
+                            val shiftX = -(right - dotsLeft) * 0.65f * (1f - splitEase)
+                            canvas.translate(shiftX, 0f)
+                            introDots.draw(canvas, dotsLeft, top, right, bottom, density,
+                                elapsed, duration, countdown.isIntro, introColor, alpha * introOpacity * splitEase, offsetY)
+                        } else null
+                    } finally {
+                        canvas.restoreToCount(rightSave)
+                    }
+                } else {
+                    introDots.draw(canvas, dotsLeft, top, right, bottom, density,
+                        elapsed, duration, countdown.isIntro, introColor, alpha * introOpacity, offsetY)
+                }
+                return if (splitAnimating) 0L else (dotsDelay ?: infoDelay)
             } finally {
                 canvas.restoreToCount(save)
             }

@@ -64,6 +64,7 @@ import androidx.compose.ui.window.Dialog as ComposeDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -77,6 +78,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
@@ -618,6 +621,8 @@ private fun AppWhitelistDialog(
                 )
             }
             Spacer(Modifier.height(10.dp))
+            val iconCache = remember { mutableMapOf<String, ImageBitmap>() }
+            val iconSizePx = remember(context) { (36 * context.resources.displayMetrics.density).toInt().coerceAtLeast(48) }
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -625,6 +630,26 @@ private fun AppWhitelistDialog(
             ) {
                 items(filtered, key = { it.first }) { (pkg, label) ->
                     val checked = pkg in selected
+                    val appIcon by produceState<ImageBitmap?>(initialValue = iconCache[pkg], pkg) {
+                        if (value == null) {
+                            val bmp = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    val drawable = context.packageManager.getApplicationIcon(pkg)
+                                    val bitmap = android.graphics.Bitmap.createBitmap(
+                                        iconSizePx, iconSizePx, android.graphics.Bitmap.Config.ARGB_8888,
+                                    )
+                                    val canvas = android.graphics.Canvas(bitmap)
+                                    drawable.setBounds(0, 0, iconSizePx, iconSizePx)
+                                    drawable.draw(canvas)
+                                    bitmap.asImageBitmap()
+                                }.getOrNull()
+                            }
+                            if (bmp != null) {
+                                iconCache[pkg] = bmp
+                                value = bmp
+                            }
+                        }
+                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -651,6 +676,22 @@ private fun AppWhitelistDialog(
                                     modifier = Modifier.size(14.dp),
                                 )
                             }
+                        }
+                        if (appIcon != null) {
+                            Image(
+                                bitmap = appIcon!!,
+                                contentDescription = label,
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(fieldBg),
+                            )
                         }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
@@ -883,12 +924,39 @@ private fun HomePage(
                 enabled = ready,
             )
             HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
-            TactileSwitchPreference(
-                checked = state.settings.preventCapsuleCollapse,
-                onCheckedChange = { app.set(CapsuleSettings.PREVENT_CAPSULE_COLLAPSE, it) },
+            val scope = rememberCoroutineScope()
+            BasicComponent(
                 title = stringResource(R.string.prevent_capsule_collapse),
                 summary = stringResource(R.string.prevent_capsule_collapse_summary),
-                enabled = ready,
+                onClick = {
+                    val directOpened = runCatching {
+                        context.startActivity(
+                            Intent("oplus.fluid.seeding.settings.main").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                        true
+                    }.getOrDefault(false)
+                    if (!directOpened) {
+                        scope.launch {
+                            val rootOpened = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    val proc = ProcessBuilder("su", "-c", "am start -a oplus.fluid.seeding.settings.main")
+                                        .redirectErrorStream(true)
+                                        .start()
+                                    proc.waitFor() == 0
+                                }.getOrDefault(false)
+                            }
+                            if (!rootOpened) {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(android.provider.Settings.ACTION_SETTINGS)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                    )
+                                }
+                                Toast.makeText(context, R.string.open_live_alerts_fallback, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                },
             )
             HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
             TactileSwitchPreference(

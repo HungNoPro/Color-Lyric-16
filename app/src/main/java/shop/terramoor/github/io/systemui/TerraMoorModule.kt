@@ -64,58 +64,6 @@ class TerraMoorModule : XposedModule() {
                     if (retained) null else chain.proceed()
                 }
             } }
-            // Prevent ColorOS 16 status-bar media capsule auto-collapse after timeout
-            installOptional(hooks, "ColorOS 16 statusBarTimeoutRunnable hook") {
-                val timeoutCls = param.classLoader.loadClass(
-                    "com.oplus.systemui.seedlingservice.mediaControl.MediaControlTip\$statusBarTimeoutRunnable\$1",
-                )
-                val runMethod = timeoutCls.getDeclaredMethod("run")
-                hook(runMethod).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
-                    if (runtime.shouldPreventCapsuleCollapse()) null else chain.proceed()
-                }
-            }
-            installOptional(hooks, "ColorOS 16 MediaControlTip hide guard hook") {
-                val tipCls = param.classLoader.loadClass(
-                    "com.oplus.systemui.seedlingservice.mediaControl.MediaControlTip",
-                )
-                val cardCls = param.classLoader.loadClass(
-                    "com.oplus.pantanal.seedling.bean.SeedlingCard",
-                )
-                val hideMethod = tipCls.getDeclaredMethod(
-                    "hideStatusBarSeedlingCard",
-                    cardCls,
-                    Boolean::class.javaPrimitiveType,
-                )
-                val showFlagField = runCatching {
-                    tipCls.getDeclaredField("isMediaSeedlingShowOnStatusBar").apply { isAccessible = true }
-                }.getOrNull()
-                val disableFlagsField = runCatching {
-                    tipCls.getDeclaredField("disableSeedlingFlags").apply { isAccessible = true }
-                }.getOrNull()
-                runCatching {
-                    val dataCls = param.classLoader.loadClass(
-                        "com.oplus.systemui.seedlingservice.mediaControl.SeedlingMediaData",
-                    )
-                    val shouldHideMethod = tipCls.getDeclaredMethod(
-                        "shouldStatusBarSeedlingCardHidden",
-                        dataCls,
-                        String::class.java,
-                        Boolean::class.javaPrimitiveType,
-                    )
-                    hooks += hook(shouldHideMethod).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
-                        if (runtime.shouldPreventCapsuleCollapse()) {
-                            val enabled = showFlagField?.getBoolean(null) != false
-                            val disabledByFlag = ((disableFlagsField?.getInt(null) ?: 0) and 1) != 0
-                            if (enabled && !disabledByFlag) return@intercept false
-                        }
-                        chain.proceed()
-                    }
-                }
-                hook(hideMethod).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
-                    val isForceHide = chain.args.getOrNull(1) as? Boolean ?: false
-                    if (!isForceHide && runtime.shouldPreventCapsuleCollapse()) null else chain.proceed()
-                }
-            }
             host.release?.let { method -> installOptional(hooks, "Media release hook") {
                 after(method) { instance, _, _ -> runtime.mediaReleased(instance) }
             } }
@@ -316,48 +264,6 @@ class TerraMoorModule : XposedModule() {
             } }
             plugin.layout?.let { method -> installOptional(hooks, "Plugin layout hook") {
                 after(method) { receiver, _, _ -> runtime.containerLaidOut(receiver) }
-            } }
-            plugin.cos16FluidEvent?.let { fluidEvent -> installOptional(hooks, "ColorOS 16 capsule timeout event guard hook") {
-                hook(fluidEvent.dispatch).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
-                    val name = fluidEvent.eventName(chain.args.firstOrNull())
-                    if (name == "EVENT_CAPSULE_TIME_OUT" && runtime.shouldPreventCapsuleCollapse()) {
-                        diagnostics?.note("Blocked ColorOS 16 EVENT_CAPSULE_TIME_OUT")
-                        null
-                    } else {
-                        chain.proceed()
-                    }
-                }
-            } }
-            plugin.cos16CapsuleTimer?.let { timer -> installOptional(hooks, "ColorOS 16 capsule 5-min timer guard hook") {
-                val bubbleHandle = hook(timer.bubbleTimeout).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
-                    if (runtime.shouldPreventCapsuleCollapse()) {
-                        diagnostics?.note("Blocked ColorOS 16 capsuleToBubble mini-shrink callback")
-                        null
-                    } else {
-                        chain.proceed()
-                    }
-                }
-                hooks += bubbleHandle
-                val resetHandle = hook(timer.reset).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
-                    val key = chain.args.firstOrNull() as? String
-                    val isBubbleOrMedia = key == "capsuleToBubble" || (key != null && key.startsWith("268452006"))
-                    if (isBubbleOrMedia && runtime.shouldPreventCapsuleCollapse()) {
-                        diagnostics?.note("Blocked ColorOS 16 5-min capsule timer reset ($key)")
-                        null
-                    } else {
-                        chain.proceed()
-                    }
-                }
-                hooks += resetHandle
-                hook(timer.schedule).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
-                    val key = chain.args.getOrNull(1) as? String
-                    if (key != null && key.startsWith("268452006") && runtime.shouldBlockMediaCapsuleTimer()) {
-                        diagnostics?.note("Blocked ColorOS 16 5-min capsule timer schedule ($key)")
-                        null
-                    } else {
-                        chain.proceed()
-                    }
-                }
             } }
             return hooks
         } catch (failure: Throwable) {

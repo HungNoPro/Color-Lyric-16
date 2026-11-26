@@ -141,7 +141,6 @@ class TerraMoorApp : Application(), XposedServiceHelper.OnServiceListener {
             CapsuleSettings.AUTO_TRANSLATE_VI -> current.copy(autoTranslateVi = checked)
             CapsuleSettings.LOCKSCREEN_BRIDGE -> current.copy(lockscreenBridge = checked)
             CapsuleSettings.AOD_UNLOCK_WHITELIST -> current.copy(aodUnlockWhitelist = checked)
-            CapsuleSettings.PREVENT_CAPSULE_COLLAPSE -> current.copy(preventCapsuleCollapse = checked)
             CapsuleSettings.AUTO_CLEAR_CACHE -> current.copy(autoClearCache = checked)
             CapsuleSettings.APP_WHITELIST_ENABLED -> current.copy(appWhitelistEnabled = checked)
             else -> return
