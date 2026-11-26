@@ -61,6 +61,7 @@ internal class CapsuleLabels(
     private var viewportStartedAt: Long? = null
     private var viewportPosition: Long? = null
     private var pauseCollapseStartedAt: Long? = null
+    private var trackBounceStartedAt: Long? = null
     private val artworkBackground = CapsuleArtworkBackground()
     private val area = RectF()
     private val artworkArea = RectF()
@@ -80,6 +81,7 @@ internal class CapsuleLabels(
     var nativeWhilePaused = false
         private set
     val isCollapsingForPause: Boolean get() = pauseCollapseStartedAt != null
+    val isBouncingForTrack: Boolean get() = trackBounceStartedAt != null
 
     fun render(
         frame: LyricFrame?, settings: CapsuleSettings, artwork: Bitmap?,
@@ -118,10 +120,15 @@ internal class CapsuleLabels(
         }
         val changed = displayLine != line || displaySettings != settings || this.artwork !== artwork ||
             this.clock != clock || this.ink != ink || trackInfoVisibilityChanged
+        val isTrackSwitch = displayTrackIdentity != null && trackIdentity != null && displayTrackIdentity !== trackIdentity
         if (displayLine?.countdown != line?.countdown || displayTrackIdentity !== trackIdentity ||
                 displaySettings?.showCover != settings.showCover || displaySettings?.showWaveform != settings.showWaveform ||
                 displaySettings?.get(CapsuleTuning.ISLAND_WIDTH) != settings[CapsuleTuning.ISLAND_WIDTH]) {
             suspendViewport()
+        }
+        if (isTrackSwitch && capsule.isShown && capsule.width > 0) {
+            trackBounceStartedAt = SystemClock.elapsedRealtime()
+            capsule.postInvalidateOnAnimation()
         }
         viewportPosition = null
         this.clock = clock
@@ -187,6 +194,7 @@ internal class CapsuleLabels(
 
     fun beginRestoreForPause(): Boolean {
         if (nativeWhilePaused) return false
+        trackBounceStartedAt = null
         if (displaySettings == null || !capsule.isShown || capsule.width <= 0 || (displayLine == null && artwork == null)) {
             restoreForPause()
             return false
@@ -195,6 +203,49 @@ internal class CapsuleLabels(
             pauseCollapseStartedAt = SystemClock.elapsedRealtime()
             capsule.postInvalidateOnAnimation()
         }
+        return true
+    }
+
+    private fun compactMaxInset(width: Int, showCover: Boolean, showWaveform: Boolean): Float {
+        val lens = resolveCamera(includeWindowFallback = true)
+        val cameraWidth = (lens?.radiusX?.times(2f) ?: (32f * density))
+        val coverSlot = if (showCover) maxOf(target.artwork.width.toFloat(), 20f * density) + 14f * density else 12f * density
+        val waveSlot = if (showWaveform) maxOf(target.waveform.width.toFloat(), 20f * density) + 14f * density else 12f * density
+        val compactTarget = (coverSlot + cameraWidth + waveSlot).coerceIn(88f * density, width.toFloat())
+        return ((width - compactTarget) / 2f).coerceAtLeast(0f)
+    }
+
+    private fun trackBounceShrinkFraction(now: Long): Float? {
+        val startedAt = trackBounceStartedAt ?: return null
+        val rawT = ((now - startedAt).toFloat() / TRACK_BOUNCE_DURATION_MS).coerceIn(0f, 1f)
+        if (rawT >= 1f) return null
+        return if (rawT <= TRACK_BOUNCE_SHRINK_RATIO) {
+            val t = rawT / TRACK_BOUNCE_SHRINK_RATIO
+            // Smooth cubic ease-in-out shrink toward compact pill
+            if (t < 0.5f) 4f * t * t * t else 1f - (-2f * t + 2f).let { it * it * it } / 2f
+        } else {
+            val t = (rawT - TRACK_BOUNCE_SHRINK_RATIO) / (1f - TRACK_BOUNCE_SHRINK_RATIO)
+            // Smooth cubic ease-out expand back to full pill
+            val open = 1f - (1f - t) * (1f - t) * (1f - t)
+            1f - open
+        }
+    }
+
+    fun prepareTrackTransition(now: Long): Boolean {
+        val shrink = trackBounceShrinkFraction(now)
+        val width = capsule.width
+        if (shrink == null || !capsule.isShown || width <= 0) {
+            trackBounceStartedAt = null
+            suspendViewport()
+            return false
+        }
+        val settings = displaySettings
+        val showCover = settings?.showCover != false
+        val showWaveform = settings?.showWaveform != false
+        val maxInset = compactMaxInset(width, showCover, showWaveform)
+        val inset = (maxInset * shrink).roundToInt().coerceAtMost((width - 1) / 2)
+        viewport.apply(inset, moveLeading = showCover, moveTrailing = showWaveform, followEdge = false)
+        capsule.postInvalidateOnAnimation()
         return true
     }
 
@@ -216,12 +267,7 @@ internal class CapsuleLabels(
         val settings = displaySettings
         val showCover = settings?.showCover != false
         val showWaveform = settings?.showWaveform != false
-        val lens = resolveCamera(includeWindowFallback = true)
-        val cameraWidth = (lens?.radiusX?.times(2f) ?: (32f * density))
-        val coverSlot = if (showCover) maxOf(target.artwork.width.toFloat(), 20f * density) + 14f * density else 12f * density
-        val waveSlot = if (showWaveform) maxOf(target.waveform.width.toFloat(), 20f * density) + 14f * density else 12f * density
-        val compactTarget = (coverSlot + cameraWidth + waveSlot).coerceIn(88f * density, width.toFloat())
-        val maxInset = ((width - compactTarget) / 2f).coerceAtLeast(0f)
+        val maxInset = compactMaxInset(width, showCover, showWaveform)
         val inset = (maxInset * ease).roundToInt().coerceAtMost((width - 1) / 2)
         viewport.apply(inset, moveLeading = showCover, moveTrailing = showWaveform, followEdge = false)
         capsule.postInvalidateOnAnimation()
@@ -268,9 +314,11 @@ internal class CapsuleLabels(
         clip.rewind()
         val radius = area.height() / 2f
         clip.addRoundRect(area, radius, radius, Path.Direction.CW)
+        val now = SystemClock.elapsedRealtime()
         val collapseT = pauseCollapseStartedAt?.let {
-            ((SystemClock.elapsedRealtime() - it).toFloat() / PAUSE_COLLAPSE_DURATION_MS).coerceIn(0f, 1f)
+            ((now - it).toFloat() / PAUSE_COLLAPSE_DURATION_MS).coerceIn(0f, 1f)
         }
+        val bounceShrink = if (collapseT == null) trackBounceShrinkFraction(now) else null
         val save = canvas.save()
         try {
             canvas.clipPath(clip)
@@ -287,10 +335,14 @@ internal class CapsuleLabels(
                     }
                 }
             }
-            val lyricOpacity = if (collapseT == null) 1f else (1f - collapseT * 2.2f).coerceIn(0f, 1f)
-            if (collapseT != null && lyricOpacity <= 0.01f) {
+            val lyricOpacity = when {
+                collapseT != null -> (1f - collapseT * 2.2f).coerceIn(0f, 1f)
+                bounceShrink != null -> (1f - bounceShrink * 1.35f).coerceIn(0f, 1f)
+                else -> 1f
+            }
+            if ((collapseT != null || bounceShrink != null) && lyricOpacity <= 0.01f) {
                 capsule.postInvalidateOnAnimation()
-                return "PAUSE_COLLAPSE"
+                return if (collapseT != null) "PAUSE_COLLAPSE" else "TRACK_BOUNCE"
             }
             val line = displayLine ?: return "ARTWORK_ONLY"
             val settings = displaySettings ?: return "ARTWORK_ONLY"
@@ -301,16 +353,15 @@ internal class CapsuleLabels(
             val left = capsuleLyricsLeft(iconStart + target.artwork.width, density, settings) + inset
             val right = capsuleLyricsRight(width.toFloat(), waveformLeft, density, settings) - inset
             val timing = clock
-            val now = SystemClock.elapsedRealtime()
             val position = if (line.isTrackInfo) now else viewportPosition ?: timing?.position(now) ?: line.startMs
-            val settled = animatedWidth == null && abs(width - capsule.measuredWidth) <= 1
+            val settled = animatedWidth == null && bounceShrink == null && abs(width - capsule.measuredWidth) <= 1
             val redrawDelay = strip.draw(
                 canvas, left, area.top, right, area.bottom,
                 lens, position, opacity = lyricOpacity, artworkArea = artworkArea,
                 trackInfoMarquee = trackInfoMarquee, trackInfoSettled = settled,
             )
             capsule.removeCallbacks(redrawContent)
-            if (collapseT != null) {
+            if (collapseT != null || bounceShrink != null) {
                 capsule.postInvalidateOnAnimation()
             } else if (line.isTrackInfo) {
                 if (capsule.windowVisibility == View.VISIBLE && redrawDelay != null) {
@@ -471,6 +522,7 @@ internal class CapsuleLabels(
 
     fun close() {
         pauseCollapseStartedAt = null
+        trackBounceStartedAt = null
         suspendViewport()
         restoreTrailingSection()
         updateCapsuleWidth(null)
@@ -497,5 +549,7 @@ internal class CapsuleLabels(
 
     private companion object {
         const val PAUSE_COLLAPSE_DURATION_MS = 280L
+        const val TRACK_BOUNCE_DURATION_MS = 420L
+        const val TRACK_BOUNCE_SHRINK_RATIO = 0.38f
     }
 }

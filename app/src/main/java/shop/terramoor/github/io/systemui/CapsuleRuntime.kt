@@ -57,6 +57,7 @@ internal class CapsuleRuntime(
     @Volatile private var hookStatusReported: Boolean = false
     private var aodTitleView = WeakReference<android.widget.TextView>(null)
     private var aodArtistView = WeakReference<android.widget.TextView>(null)
+    private val aodOverlay = AodLyricOverlay { onMain("AOD attached") { renderAodOnly() } }
     private var preferences: SharedPreferences? = null
     private var preferenceAttempts = 0
     private var settingsUpdateRegistered = false
@@ -106,21 +107,24 @@ internal class CapsuleRuntime(
         }
         val binding = labels
         binding?.enforceNativeVisibility()
-        if (binding != null && !binding.nativeWhilePaused && !binding.hasInterludeViewport && !binding.isCollapsingForPause) {
+        if (binding != null && !binding.nativeWhilePaused && !binding.hasInterludeViewport &&
+            !binding.isCollapsingForPause && !binding.isBouncingForTrack) {
             binding.maintainNativeSizing()
         }
         if (binding != null && binding.isCollapsingForPause) {
             protect("Capsule pause collapse") { binding.preparePauseCollapse(SystemClock.elapsedRealtime()) }
+        } else if (binding != null && binding.isBouncingForTrack) {
+            protect("Capsule track transition") { binding.prepareTrackTransition(SystemClock.elapsedRealtime()) }
         }
         if (binding != null && !binding.isCollapsingForPause && (renderedShown != binding.target.capsule.isShown ||
                 !binding.nativeWhilePaused && (settings.artwork || settings.lyricTintEnabled) &&
                 session?.artworkChanged(binding.target.artwork) == true)) {
             protect("Capsule visibility or artwork", ::render)
         }
-        val viewportBinding = labels?.takeIf { it.hasInterludeViewport && !it.isCollapsingForPause }
+        val viewportBinding = labels?.takeIf { it.hasInterludeViewport && !it.isCollapsingForPause && !it.isBouncingForTrack }
         if (viewportBinding != null) {
             protect("Capsule viewport") { prepareViewport(viewportBinding) }
-        } else if (labels?.isCollapsingForPause != true) {
+        } else if (labels?.isCollapsingForPause != true && labels?.isBouncingForTrack != true) {
             updateInterludeStatusBarSpace(compact = false)
         }
         true
@@ -149,6 +153,7 @@ internal class CapsuleRuntime(
         if (settings == previous) return
         if (settings.introDots != previous.introDots) session?.lastLoggedLine = null
         if (!settings.enabled) {
+            aodOverlay.restoreNative()
             stopObservation()
             setStatus("Lyrics disabled")
             return
@@ -171,9 +176,65 @@ internal class CapsuleRuntime(
 
     fun isAodWhitelistUnlocked(): Boolean = settings.enabled && settings.aodUnlockWhitelist
 
-    fun bindAodMediaViews(title: android.widget.TextView?, artist: android.widget.TextView?) = onMain("AOD media bind") {
+    fun bindAodMediaLayout(layout: ViewGroup, nativeRoot: View?) = onMain("AOD layout bind") {
+        Log.i(TAG, "[AOD] bindAodMediaLayout: ${layout.javaClass.name}, attached=${layout.isAttachedToWindow}, vis=${layout.visibility}")
+        aodOverlay.bind(layout, nativeRoot)
+        renderAodOnly()
+    }
+
+    fun onAodMediaLayoutVisible(layout: ViewGroup, nativeRoot: View?) = onMain("AOD layout visible") {
+        Log.i(TAG, "[AOD] onAodMediaLayoutVisible: ${layout.javaClass.name}, attached=${layout.isAttachedToWindow}, vis=${layout.visibility}")
+        aodOverlay.bind(layout, nativeRoot)
+        renderAodOnly()
+    }
+
+    fun bindAodMediaViews(
+        player: ViewGroup?,
+        playerContainer: View?,
+        albumView: android.widget.ImageView?,
+        title: android.widget.TextView?,
+        artist: android.widget.TextView?,
+    ) = onMain("AOD media bind") {
+        if (player != null) {
+            aodOverlay.bind(player, playerContainer, albumView)
+        }
         if (title != null) aodTitleView = WeakReference(title)
         if (artist != null) aodArtistView = WeakReference(artist)
+        renderAodOnly()
+    }
+
+    private fun updateAodOverlay(
+        watch: Session?,
+        timeline: Timeline?,
+        index: Int,
+        mainText: String?,
+        translationText: String?,
+        countdown: shop.terramoor.github.io.lyrics.LyricCountdown? = null,
+        positionMs: Long = 0L,
+        nextLineDelayMs: Long? = null,
+    ) {
+        val playing = watch != null && !watch.isPaused
+        val enabled = isLockscreenBridgeEnabled() && watch != null &&
+            !(watch.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE)
+        val nextLine = if (countdown == null && timeline != null && index >= 0) {
+            ((index + 1) until timeline.lines.size)
+                .asSequence()
+                .mapNotNull { timeline.lines[it].text.trim().takeIf(String::isNotEmpty) }
+                .firstOrNull()
+        } else null
+        aodOverlay.update(
+            enabled = enabled,
+            playing = playing,
+            songTitle = watch?.aodSongTitle(),
+            songArtist = watch?.aodSongArtist(),
+            artwork = watch?.aodArtwork(),
+            main = mainText,
+            translation = translationText,
+            next = nextLine,
+            countdown = countdown,
+            positionMs = positionMs,
+            nextLineDelayMs = nextLineDelayMs,
+        )
     }
 
     private fun updateAodLyricViews(frame: LyricFrame?) {
@@ -246,8 +307,9 @@ internal class CapsuleRuntime(
             }
         } ?: return null
 
-        val lrc = runCatching { org.json.JSONObject(payloadJson).optString("lyric") }.getOrNull()
+        val rawLrc = runCatching { org.json.JSONObject(payloadJson).optString("lyric") }.getOrNull()
             ?.takeIf { it.isNotBlank() } ?: return null
+        val lrc = stripInlineWordTimestamps(rawLrc)
 
         return runCatching {
             val lyricDataCls = loader.loadClass("com.android.systemui.media.controls.models.player.OplusMediaLyricData")
@@ -268,11 +330,12 @@ internal class CapsuleRuntime(
     fun injectSeedlingLyrics(title: String?, artist: String?, lrc: String) {
         if (!isLockscreenBridgeEnabled() || !host.isSeedlingMediaMode) return
         val controller = mediaController.get() ?: return
+        val cleanLrc = stripInlineWordTimestamps(lrc)
         runCatching {
             val loader = controller.javaClass.classLoader ?: return
             val parserCls = loader.loadClass("com.android.systemui.media.controls.models.player.LyricParser")
             val parserInstance = parserCls.getField("INSTANCE").get(null)
-            val parsedLines = parserCls.getMethod("parse", String::class.java).invoke(parserInstance, lrc) as? List<*>
+            val parsedLines = parserCls.getMethod("parse", String::class.java).invoke(parserInstance, cleanLrc) as? List<*>
             if (parsedLines.isNullOrEmpty()) return
             val seedlingLyricCls = loader.loadClass("com.oplus.systemui.seedlingservice.mediaControl.LyricData")
             val ctor = seedlingLyricCls.getConstructor(
@@ -287,6 +350,14 @@ internal class CapsuleRuntime(
         }
     }
 
+    private fun stripInlineWordTimestamps(lrc: String): String {
+        val noAngleTags = INLINE_WORD_TIMESTAMP_REGEX.replace(lrc, "")
+        // Normalize 3-digit millisecond line timestamps [mm:ss.xxx] to standard 2-digit [mm:ss.xx] for ColorOS LyricParser
+        return THREE_DIGIT_LINE_TS_REGEX.replace(noAngleTags) { m ->
+            "[${m.groupValues[1]}:${m.groupValues[2]}.${m.groupValues[3].take(2)}]"
+        }
+    }
+
     fun bridgeLyricInfo(metadata: MediaMetadata): String? {
         if (!settings.enabled || !settings.lockscreenBridge) return null
         val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)?.trim()?.lowercase(java.util.Locale.ROOT)
@@ -297,7 +368,19 @@ internal class CapsuleRuntime(
     private fun storeBridgedPayload(title: String?, payload: String) {
         val key = title?.trim()?.lowercase(java.util.Locale.ROOT)?.takeIf { it.isNotEmpty() } ?: return
         if (bridgedPayloadsByTitle.size > 32) bridgedPayloadsByTitle.clear()
-        bridgedPayloadsByTitle[key] = payload
+        val sanitized = runCatching {
+            val obj = org.json.JSONObject(payload)
+            val lrc = obj.optString("lyric")
+            if (lrc.isNotEmpty()) {
+                obj.put("lyric", stripInlineWordTimestamps(lrc))
+            }
+            val rawLrc = obj.optString("rawLyric")
+            if (rawLrc.isNotEmpty()) {
+                obj.put("rawLyric", stripInlineWordTimestamps(rawLrc))
+            }
+            obj.toString()
+        }.getOrDefault(payload)
+        bridgedPayloadsByTitle[key] = sanitized
     }
 
     private fun buildTranslationLrc(timeline: Timeline): String {
@@ -902,31 +985,56 @@ internal class CapsuleRuntime(
     }
 
     private fun renderAodOnly() {
-        if (!isLockscreenBridgeEnabled()) return
-        val titleTv = aodTitleView.get()?.takeIf { it.isAttachedToWindow } ?: return
-        val watch = session ?: return
-        val timeline = watch.timeline ?: return
+        val watch = session
+        val timeline = watch?.timeline
+        if (!isLockscreenBridgeEnabled() || watch == null || timeline == null) {
+            aodOverlay.restoreNative()
+            return
+        }
+        val presentation = LyricPresentation(timeline, settings)
         val clock = watch.playbackClock()
         val now = SystemClock.elapsedRealtime()
+        val uptime = SystemClock.uptimeMillis()
         val position = clock.position(now)
-        val index = timeline.indexAt(position)
-        val current = timeline.lines.getOrNull(index)
+        val index = if (watch.hasPlaybackPosition) presentation.indexAt(position) else -1
+        val trackRows = { watch.trackInfo()?.rows }
+        val frame = if (watch.hasPlaybackPosition) {
+            presentation.introAt(position, trackRows) ?: presentation.frameAt(index, watch.duration, trackRows)
+        } else null
+        val current = presentation.lines.getOrNull(index)
         val first = current?.text?.trim()?.takeIf { it.isNotEmpty() }
         val second = current?.translation?.trim()?.takeIf { it.isNotEmpty() }
-        if (first != null && titleTv.text?.toString() != first) {
+        val countdown = frame?.countdown
+
+        val nextStart = presentation.nextBoundary(index)
+        val wakeupTarget = when {
+            countdown != null -> countdown.endMs
+            nextStart != null -> nextStart
+            else -> null
+        }
+        val nextDelay = if (clock.moving && wakeupTarget != null) clock.delayTo(position, wakeupTarget) else null
+
+        updateAodOverlay(watch, timeline, index, first, second, countdown, position, nextDelay)
+
+        val titleTv = aodTitleView.get()?.takeIf { it.isAttachedToWindow }
+        if (titleTv != null && first != null && titleTv.text?.toString() != first) {
             titleTv.text = first
         }
         val artistTv = aodArtistView.get()?.takeIf { it.isAttachedToWindow }
         if (artistTv != null && second != null && artistTv.text?.toString() != second) {
             artistTv.text = second
         }
-        val nextStart = timeline.lines.getOrNull(index + 1)?.startMs
-        if (clock.moving && nextStart != null) {
-            val delay = clock.delayTo(position, nextStart)?.coerceIn(50L, 60_000L)
-            if (delay != null) {
-                main.removeCallbacks(tick)
-                main.postDelayed(tick, delay)
-            }
+
+        val aodActive = aodOverlay.isActive || titleTv != null
+        if (aodActive && clock.moving && wakeupTarget != null && nextDelay != null) {
+            // If next line is longer than the steady wake-lock ceiling, wake once mid-way to refresh
+            // DRAW_WAKE_LOCK cleanly without letting the panel drop to STATE_DOZE_SUSPEND.
+            val alarmDelay = minOf(nextDelay, AodLyricOverlay.STEADY_DOZE_HOLD_MAX_MS - 3_000L)
+            aodOverlay.scheduleDozeWakeup(alarmDelay, main) { protect("AOD lyric tick", ::render) }
+            val planned = LyricBoundaryTick.plan(clock, wakeupTarget, now, uptime)
+            setLyricTick(planned)
+        } else {
+            aodOverlay.cancelDozeWakeup()
         }
     }
 
@@ -951,6 +1059,7 @@ internal class CapsuleRuntime(
         if (watch.isPaused && settings.pauseBehavior == PauseBehavior.RESTORE_NATIVE) {
             centeredMedia.remove(binding.target.capsule)
             updateInterludeStatusBarSpace(compact = false)
+            aodOverlay.restoreNative()
             if (!binding.isCollapsingForPause && !binding.nativeWhilePaused) {
                 binding.beginRestoreForPause()
             }
@@ -978,6 +1087,7 @@ internal class CapsuleRuntime(
         val presentation = watch.timeline?.let { LyricPresentation(it, settings) }
         if (presentation == null || presentation.lines.isEmpty()) {
             setLyricTick(null)
+            aodOverlay.restoreNative()
             val trackInfo = if (settings.noLyricsMode == NoLyricsMode.TRACK) watch.trackInfo() else null
             renderFrame(binding, trackInfo, "NO_TIMELINE", background, ink)
             trace("render", "NO_TIMELINE, trackInfo=${trackInfo != null}, artwork=${background != null}, shown=${binding.target.capsule.isShown}, size=${binding.target.capsule.width}x${binding.target.capsule.height}")
@@ -1014,7 +1124,31 @@ internal class CapsuleRuntime(
             renderFrame(binding, introInfo, "INTRO_OR_GAP", background, ink)
             setStatus("Waiting for next lyric boundary")
         }
-        val planned = if (shown && next != null) LyricBoundaryTick.plan(clock, next, now, uptime) else null
+        val aodCountdown = frame?.countdown
+        val aodWakeTarget = when {
+            aodCountdown != null -> aodCountdown.endMs
+            next != null -> next
+            else -> null
+        }
+        val aodNextDelay = if (clock.moving && aodWakeTarget != null) clock.delayTo(position, aodWakeTarget) else null
+        updateAodOverlay(
+            watch = watch,
+            timeline = watch.timeline,
+            index = index,
+            mainText = line?.text,
+            translationText = line?.translation,
+            countdown = aodCountdown,
+            positionMs = position,
+            nextLineDelayMs = aodNextDelay,
+        )
+        val aodActive = aodOverlay.isActive
+        if (aodActive && clock.moving && aodNextDelay != null) {
+            val alarmDelay = minOf(aodNextDelay, AodLyricOverlay.STEADY_DOZE_HOLD_MAX_MS - 3_000L)
+            aodOverlay.scheduleDozeWakeup(alarmDelay, main) { protect("AOD lyric tick", ::render) }
+        } else {
+            aodOverlay.cancelDozeWakeup()
+        }
+        val planned = if ((shown || aodActive) && next != null) LyricBoundaryTick.plan(clock, next, now, uptime) else null
         setLyricTick(planned)
         trace("scheduler", when {
             planned != null -> "NEXT_LINE index=$index, targetMs=$next"
@@ -1376,6 +1510,13 @@ internal class CapsuleRuntime(
 
         fun playbackClock(): PlaybackClock = playback.clock(duration)
 
+        fun aodSongTitle(): String? = track?.title?.trim()?.takeIf { it.isNotEmpty() }
+
+        fun aodSongArtist(): String? = track?.artist?.trim()?.takeIf { it.isNotEmpty() }
+
+        fun aodArtwork(): Bitmap? =
+            (selectedArtwork ?: metadataArtwork ?: nativeArtwork ?: iconArtwork)?.takeUnless { it.isRecycled }
+
         fun metadataChanged(data: MediaMetadata?): Boolean {
             if (data == null) {
                 logLyrics("Media metadata missing")
@@ -1597,6 +1738,8 @@ internal class CapsuleRuntime(
         const val MEDIA_HANDOFF_MS = 300L
         const val METADATA_GRACE_MS = 750L
         const val CARD_SCENE_MS = 2_000L
+        val INLINE_WORD_TIMESTAMP_REGEX = Regex("""<\d{1,4}:\d{2}(?:[.:]\d{1,3})?>""")
+        val THREE_DIGIT_LINE_TS_REGEX = Regex("""\[(\d{1,4}):(\d{2})[.:](\d{3})]""")
         val INTERLUDE_HANDOFF_SCENES = setOf(
             "CAPSULE_TO_CARD", "CARD_TO_CAPSULE", "CARD_TO_CAPSULE_BY_INTERRUPT",
             "SINGLE_CAPSULE_TO_APP", "APP_TO_CAPSULE_WITH_NONE", "APP_TO_CAPSULE",

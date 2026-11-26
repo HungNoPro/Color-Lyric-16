@@ -153,19 +153,82 @@ class TerraMoorModule : XposedModule() {
                     runtime.aodHooked = true
                 }
             }
+            installOptional(hooks, "AOD AodMediaLayout live lyrics overlay hook") {
+                val layoutCls = param.classLoader.loadClass("com.oplus.systemui.aod.aodclock.off.media.AodMediaLayout")
+                val ctor = layoutCls.getDeclaredConstructor(
+                    android.content.Context::class.java,
+                    android.util.AttributeSet::class.java,
+                    Int::class.javaPrimitiveType,
+                )
+                val rootField = runCatching {
+                    layoutCls.getDeclaredField("mRootView").apply { isAccessible = true }
+                }.getOrNull()
+                hook(ctor).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    val res = chain.proceed()
+                    val layout = chain.thisObject as? android.view.ViewGroup
+                    if (layout != null) {
+                        val nativeRoot = runCatching { rootField?.get(layout) as? android.view.View }.getOrNull()
+                        runtime.bindAodMediaLayout(layout, nativeRoot)
+                    }
+                    res
+                }.also {
+                    runCatching {
+                        val setVis = layoutCls.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType)
+                        hooks += hook(setVis).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                            val res = chain.proceed()
+                            val layout = chain.thisObject as? android.view.ViewGroup
+                            val vis = chain.args.firstOrNull() as? Int
+                            if (layout != null && vis == android.view.View.VISIBLE) {
+                                val nativeRoot = runCatching { rootField?.get(layout) as? android.view.View }.getOrNull()
+                                runtime.onAodMediaLayoutVisible(layout, nativeRoot)
+                            }
+                            res
+                        }
+                    }
+                    runCatching {
+                        val onMeta = layoutCls.getDeclaredMethod(
+                            "onPrimaryMetadataOrStateChanged",
+                            android.media.MediaMetadata::class.java,
+                            Int::class.javaPrimitiveType,
+                        )
+                        hooks += hook(onMeta).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                            val res = chain.proceed()
+                            val layout = chain.thisObject as? android.view.ViewGroup
+                            if (layout != null) {
+                                val nativeRoot = runCatching { rootField?.get(layout) as? android.view.View }.getOrNull()
+                                runtime.onAodMediaLayoutVisible(layout, nativeRoot)
+                            }
+                            res
+                        }
+                    }
+                    runtime.aodHooked = true
+                }
+            }
             installOptional(hooks, "AOD AodMediaViewHolder live lyrics hook") {
                 val vhCls = param.classLoader.loadClass("com.oplusos.systemui.aod.mediapanel.AodMediaViewHolder")
                 val ctor = vhCls.declaredConstructors.firstOrNull { it.parameterCount == 2 }
                     ?: throw NativeContract.Mismatch("missing AodMediaViewHolder 2-arg ctor")
                 val titleField = vhCls.getDeclaredField("titleText").apply { isAccessible = true }
                 val artistField = vhCls.getDeclaredField("artistText").apply { isAccessible = true }
+                val playerField = runCatching {
+                    vhCls.getDeclaredField("player").apply { isAccessible = true }
+                }.getOrNull()
+                val containerField = runCatching {
+                    vhCls.getDeclaredField("playerContainer").apply { isAccessible = true }
+                }.getOrNull()
+                val albumField = runCatching {
+                    vhCls.getDeclaredField("albumView").apply { isAccessible = true }
+                }.getOrNull()
                 hook(ctor).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
                     val res = chain.proceed()
                     val holder = chain.thisObject
                     if (holder != null) {
                         val titleTv = titleField.get(holder) as? android.widget.TextView
                         val artistTv = artistField.get(holder) as? android.widget.TextView
-                        runtime.bindAodMediaViews(titleTv, artistTv)
+                        val playerVg = runCatching { playerField?.get(holder) as? android.view.ViewGroup }.getOrNull()
+                        val containerV = runCatching { containerField?.get(holder) as? android.view.View }.getOrNull()
+                        val albumIv = runCatching { albumField?.get(holder) as? android.widget.ImageView }.getOrNull()
+                        runtime.bindAodMediaViews(playerVg, containerV, albumIv, titleTv, artistTv)
                     }
                     res
                 }.also { runtime.aodHooked = true }
