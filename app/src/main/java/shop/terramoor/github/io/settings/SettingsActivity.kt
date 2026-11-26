@@ -8,7 +8,10 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
+import android.text.format.Formatter
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -51,16 +54,17 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.window.Dialog as ComposeDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -95,6 +99,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
+import com.itos.coui.backdrop.CouiBackdrop
+import com.itos.coui.backdrop.ProvideCouiBackdrop
+import com.itos.coui.backdrop.couiBackdrop
+import com.itos.coui.backdrop.rememberCouiBackdrop
 import com.itos.coui.dialog.CouiDialogAction
 import com.itos.coui.dialog.CouiDialogActionStyle
 import com.itos.coui.dialog.CouiDialogDefaults
@@ -110,12 +118,18 @@ import io.github.suqi8.coui.kmp.basic.BasicComponent
 import io.github.suqi8.coui.kmp.basic.Button
 import io.github.suqi8.coui.kmp.basic.ButtonColors
 import io.github.suqi8.coui.kmp.basic.ButtonDefaults
+import io.github.suqi8.coui.kmp.basic.LinearProgressIndicator
 import io.github.suqi8.coui.kmp.basic.TextButton
+import io.github.suqi8.coui.kmp.basic.TextField
+import io.github.suqi8.coui.kmp.basic.TextFieldMode
 import io.github.suqi8.coui.kmp.basic.DividerDefaults
 import io.github.suqi8.coui.kmp.basic.HorizontalDivider
 import io.github.suqi8.coui.kmp.basic.Icon
 import io.github.suqi8.coui.kmp.basic.Card
 import io.github.suqi8.coui.kmp.basic.CardDefaults
+import io.github.suqi8.coui.kmp.preference.ArrowPreference
+import io.github.suqi8.coui.kmp.preference.CheckboxLocation
+import io.github.suqi8.coui.kmp.preference.CheckboxPreference
 import com.itos.coui.layout.Scaffold as FloatingScaffold
 import io.github.suqi8.coui.kmp.basic.Text
 import io.github.suqi8.coui.kmp.theme.COUITheme
@@ -125,9 +139,11 @@ import io.github.suqi8.coui.kmp.utils.CouiHapticEffect
 import io.github.suqi8.coui.kmp.utils.rememberCouiHaptic
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import shop.terramoor.github.io.R
 import shop.terramoor.github.io.settings.TerraMoorApp.Connection
 import kotlin.math.abs
@@ -139,6 +155,9 @@ class SettingsActivity : ComponentActivity() {
     private var restartBusy by mutableStateOf(false)
     private var updateResult by mutableStateOf<GitHubUpdates.Result>(GitHubUpdates.Result.Idle)
     private var updatePopupRelease by mutableStateOf<GitHubUpdates.Result.Latest?>(null)
+    private var updateDownloadState by mutableStateOf<GitHubUpdates.DownloadState>(GitHubUpdates.DownloadState.Idle)
+    private var updateDownloadJob: Job? = null
+    private var pendingInstallApk: File? = null
     private val onboarding by lazy { getSharedPreferences("onboarding", MODE_PRIVATE) }
     private var providerStatuses by mutableStateOf<Map<LyricsProvider, Boolean>>(emptyMap())
     private var lockScreenLyricsConfirmed by mutableStateOf(false)
@@ -151,7 +170,9 @@ class SettingsActivity : ComponentActivity() {
         enableEdgeToEdge()
         val version = packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
         if (savedInstanceState == null) {
-            checkForUpdates(version, showPopupIfNewer = true)
+            if (!maybeTriggerDebugFakeUpdate(intent)) {
+                checkForUpdates(version, showPopupIfNewer = true)
+            }
         }
         setContent {
             val state by app.state.collectAsState()
@@ -163,6 +184,22 @@ class SettingsActivity : ComponentActivity() {
             }
             val exportDiagnostics = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
                 if (uri != null) saveDiagnostics(uri)
+            }
+            val unknownSourcesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+                val apk = pendingInstallApk
+                if (apk != null && apk.exists() && packageManager.canRequestPackageInstalls()) {
+                    pendingInstallApk = null
+                    launchApkInstaller(apk)
+                }
+            }
+            val triggerInstall: (File) -> Unit = { apkFile ->
+                installDownloadedApk(apkFile) {
+                    runCatching {
+                        unknownSourcesLauncher.launch(
+                            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
+                        )
+                    }.onFailure { notify(R.string.update_install_failed) }
+                }
             }
             COUITheme(colors = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 SettingsPage(
@@ -182,12 +219,26 @@ class SettingsActivity : ComponentActivity() {
                     openRepository = { openWeb(GitHubUpdates.UPSTREAM_REPOSITORY_URL) },
                     updateResult = updateResult,
                     updatePopupRelease = updatePopupRelease,
-                    onDismissUpdatePopup = { updatePopupRelease = null },
+                    updateDownloadState = updateDownloadState,
+                    onDismissUpdatePopup = {
+                        cancelOtaDownload()
+                        updatePopupRelease = null
+                    },
+                    onStartOtaDownload = { release ->
+                        startOtaDownload(release, triggerInstall)
+                    },
+                    onCancelOtaDownload = ::cancelOtaDownload,
+                    onInstallOtaApk = triggerInstall,
                     onOpenUpdateRelease = { url ->
+                        cancelOtaDownload()
                         updatePopupRelease = null
                         openWeb(url)
                     },
                     checkForUpdates = { checkForUpdates(version, showPopupIfNewer = true) },
+                    openUpdateDialog = { release ->
+                        updateDownloadState = GitHubUpdates.DownloadState.Idle
+                        updatePopupRelease = release
+                    },
                     openReleases = { openWeb(GitHubUpdates.RELEASES_URL) },
                     copySupportGroup = ::copySupportGroup,
                     canExportDiagnostics = !diagnosticsBusy,
@@ -198,6 +249,29 @@ class SettingsActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        maybeTriggerDebugFakeUpdate(intent)
+    }
+
+    private fun maybeTriggerDebugFakeUpdate(intent: Intent?): Boolean {
+        val debuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (!debuggable || intent?.getBooleanExtra("debug_fake_update", false) != true) return false
+        val fakeRelease = GitHubUpdates.Result.Latest(
+            tag = "v1.1.8-test",
+            comparison = GitHubUpdates.Comparison.NEWER,
+            releaseNotes = "• Fixed AOD overlay conflict with Google Maps navigation box.\n• Added in-app COUI 17 OTA update downloader & installer.\n• Upgraded App Whitelist dialog to COUI 17 liquid glass.",
+            releaseUrl = GitHubUpdates.RELEASES_URL,
+            apkDownloadUrl = "https://github.com/HungNoPro/Color-Lyric-16/releases/download/v1.1.7/Color-Lyric-16-v1.1.7.apk",
+            apkName = "Color-Lyric-16-v1.1.8-test.apk",
+            apkSizeBytes = 34_390_048L,
+        )
+        updateResult = fakeRelease
+        updateDownloadState = GitHubUpdates.DownloadState.Idle
+        updatePopupRelease = fakeRelease
+        return true
     }
 
     override fun onResume() {
@@ -247,8 +321,75 @@ class SettingsActivity : ComponentActivity() {
             val result = GitHubUpdates.check(version.longVersionCode, version.versionName.orEmpty())
             updateResult = result
             if (showPopupIfNewer && result is GitHubUpdates.Result.Latest && result.comparison == GitHubUpdates.Comparison.NEWER) {
+                updateDownloadState = GitHubUpdates.DownloadState.Idle
                 updatePopupRelease = result
             }
+        }
+    }
+
+    private fun startOtaDownload(
+        release: GitHubUpdates.Result.Latest,
+        onReadyToInstall: (File) -> Unit,
+    ) {
+        val url = release.apkDownloadUrl
+        if (url.isNullOrBlank()) {
+            updatePopupRelease = null
+            openWeb(release.releaseUrl)
+            return
+        }
+        updateDownloadJob?.cancel()
+        updateDownloadState = GitHubUpdates.DownloadState.Downloading(0L, release.apkSizeBytes)
+        updateDownloadJob = lifecycleScope.launch {
+            try {
+                val apkFile = GitHubUpdates.downloadApk(
+                    context = this@SettingsActivity,
+                    downloadUrl = url,
+                    fileName = release.apkName,
+                    expectedSizeBytes = release.apkSizeBytes,
+                    onProgress = { downloaded, total ->
+                        updateDownloadState = GitHubUpdates.DownloadState.Downloading(downloaded, total)
+                    },
+                )
+                updateDownloadState = GitHubUpdates.DownloadState.Ready(apkFile)
+                onReadyToInstall(apkFile)
+            } catch (_: CancellationException) {
+                updateDownloadState = GitHubUpdates.DownloadState.Idle
+            } catch (error: Throwable) {
+                updateDownloadState = GitHubUpdates.DownloadState.Failed(error.message)
+            }
+        }
+    }
+
+    private fun cancelOtaDownload() {
+        updateDownloadJob?.cancel()
+        updateDownloadJob = null
+        updateDownloadState = GitHubUpdates.DownloadState.Idle
+    }
+
+    private fun installDownloadedApk(apkFile: File, onNeedPermission: () -> Unit) {
+        if (!apkFile.exists()) {
+            updateDownloadState = GitHubUpdates.DownloadState.Failed(null)
+            return
+        }
+        if (!packageManager.canRequestPackageInstalls()) {
+            pendingInstallApk = apkFile
+            notify(R.string.update_install_permission_needed)
+            onNeedPermission()
+            return
+        }
+        launchApkInstaller(apkFile)
+    }
+
+    private fun launchApkInstaller(apkFile: File) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apkFile)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (_: Throwable) {
+            notify(R.string.update_install_failed)
         }
     }
 
@@ -387,9 +528,14 @@ private fun SettingsPage(
     openRepository: () -> Unit,
     updateResult: GitHubUpdates.Result,
     updatePopupRelease: GitHubUpdates.Result.Latest?,
+    updateDownloadState: GitHubUpdates.DownloadState,
     onDismissUpdatePopup: () -> Unit,
+    onStartOtaDownload: (GitHubUpdates.Result.Latest) -> Unit,
+    onCancelOtaDownload: () -> Unit,
+    onInstallOtaApk: (File) -> Unit,
     onOpenUpdateRelease: (String) -> Unit,
     checkForUpdates: () -> Unit,
+    openUpdateDialog: (GitHubUpdates.Result.Latest) -> Unit,
     openReleases: () -> Unit,
     copySupportGroup: () -> Unit,
     canUseBackup: Boolean,
@@ -456,120 +602,152 @@ private fun SettingsPage(
             },
         )
     }
-    if (updatePopupRelease != null && !showProviderPrompt && !showRestartConfirmation && !showLockScreenPrompt) {
-        UpdateAvailableDialog(
-            release = updatePopupRelease,
-            currentVersion = version,
-            onDismiss = onDismissUpdatePopup,
-            onDownload = { onOpenUpdateRelease(updatePopupRelease.releaseUrl) },
-        )
-    }
     BackHandler(currentTab != SettingsTab.HOME) { selectTab(SettingsTab.HOME) }
     val background = CouiPageDefaults.themeColors().background
-    FloatingScaffold(
-        containerColor = background,
-        topBar = {
-            TopAppBarSurface(gradientColor = background, dark = isSystemInDarkTheme()) {
-                SettingsTopBar(
-                    titleVisibility = {
-                        val offset = pager.currentPage - SettingsTab.TUNING.ordinal + pager.currentPageOffsetFraction
-                        (1f - abs(offset)).coerceIn(0f, 1f)
-                    },
-                    showTitle = currentTab == SettingsTab.TUNING,
-                    showRestartReminder = false,
-                    restartAction = {
-                        RestartSystemUiButton(enabled = !restartBusy) { showRestartConfirmation = true }
-                    },
-                )
+    val dialogBackdrop = rememberCouiBackdrop()
+    var showWhitelistDialog by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxSize()) {
+        FloatingScaffold(
+            modifier = Modifier.couiBackdrop(dialogBackdrop),
+            containerColor = background,
+            topBar = {
+                TopAppBarSurface(gradientColor = background, dark = isSystemInDarkTheme()) {
+                    SettingsTopBar(
+                        titleVisibility = {
+                            val offset = pager.currentPage - SettingsTab.TUNING.ordinal + pager.currentPageOffsetFraction
+                            (1f - abs(offset)).coerceIn(0f, 1f)
+                        },
+                        showTitle = currentTab == SettingsTab.TUNING,
+                        showRestartReminder = false,
+                        restartAction = {
+                            RestartSystemUiButton(enabled = !restartBusy) { showRestartConfirmation = true }
+                        },
+                    )
+                }
+            },
+            bottomBar = { FloatingTabBar(currentTab, ::selectTab) },
+        ) { padding ->
+            val topPadding = remember(padding) {
+                object : PaddingValues by padding {
+                    override fun calculateBottomPadding() = 0.dp
+                }
             }
-        },
-        bottomBar = { FloatingTabBar(currentTab, ::selectTab) },
-    ) { padding ->
-        val topPadding = remember(padding) {
-            object : PaddingValues by padding {
-                override fun calculateBottomPadding() = 0.dp
-            }
-        }
-        // Read the scaffold's padding during measurement, after it measures the shared header.
-        val content = Modifier.fillMaxSize().padding(topPadding).consumeWindowInsets(padding)
-        val bottomClearance = padding.calculateBottomPadding()
-        ProvideCouiMenuBackdrop(isolateContent = false) { backdrop ->
-            HorizontalPager(
-                state = pager,
-                modifier = backdrop.then(content),
-                beyondViewportPageCount = 1,
-                userScrollEnabled = true,
-                key = { tabs[it].name },
-            ) { page ->
-                val tab = tabs[page]
-                pageState.SaveableStateProvider(tab.name) {
-                    when (tab) {
-                        SettingsTab.HOME -> HomePage(
-                            Modifier.fillMaxSize(), bottomClearance, state, app,
-                        )
-                        SettingsTab.TUNING -> {
-                            val visible by remember(pager, page) {
-                                derivedStateOf { abs(pager.currentPage - page + pager.currentPageOffsetFraction) < 1f }
+            // Read the scaffold's padding during measurement, after it measures the shared header.
+            val content = Modifier.fillMaxSize().padding(topPadding).consumeWindowInsets(padding)
+            val bottomClearance = padding.calculateBottomPadding()
+            ProvideCouiMenuBackdrop(isolateContent = false) { backdrop ->
+                HorizontalPager(
+                    state = pager,
+                    modifier = backdrop.then(content),
+                    beyondViewportPageCount = 1,
+                    userScrollEnabled = true,
+                    key = { tabs[it].name },
+                ) { page ->
+                    val tab = tabs[page]
+                    pageState.SaveableStateProvider(tab.name) {
+                        when (tab) {
+                            SettingsTab.HOME -> HomePage(
+                                Modifier.fillMaxSize(), bottomClearance, state, app,
+                                onOpenWhitelist = { showWhitelistDialog = true },
+                            )
+                            SettingsTab.TUNING -> {
+                                val visible by remember(pager, page) {
+                                    derivedStateOf { abs(pager.currentPage - page + pager.currentPageOffsetFraction) < 1f }
+                                }
+                                TuningPage(Modifier.fillMaxSize(), bottomClearance, background, state, app, visible,
+                                    translationHelpHidden, onHideTranslationHelp)
                             }
-                            TuningPage(Modifier.fillMaxSize(), bottomClearance, background, state, app, visible,
-                                translationHelpHidden, onHideTranslationHelp)
+                            SettingsTab.ABOUT -> AboutPage(
+                                Modifier.fillMaxSize(), bottomClearance, version, canUseBackup, onExport, onImport,
+                                openRepository, updateResult, checkForUpdates, openUpdateDialog, openReleases, copySupportGroup,
+                                canExportDiagnostics, onExportDiagnostics,
+                            )
                         }
-                        SettingsTab.ABOUT -> AboutPage(
-                            Modifier.fillMaxSize(), bottomClearance, version, canUseBackup, onExport, onImport,
-                            openRepository, updateResult, checkForUpdates, openReleases, copySupportGroup,
-                            canExportDiagnostics, onExportDiagnostics,
-                        )
                     }
                 }
             }
+        }
+        AppWhitelistDialog(
+            show = showWhitelistDialog,
+            initialSelected = state.settings.appWhitelistPackages,
+            backdrop = dialogBackdrop,
+            onDismiss = { showWhitelistDialog = false },
+            onSave = { selected ->
+                showWhitelistDialog = false
+                app.setAppWhitelist(selected)
+            },
+        )
+        if (updatePopupRelease != null && !showProviderPrompt && !showRestartConfirmation && !showLockScreenPrompt) {
+            UpdateAvailableDialog(
+                release = updatePopupRelease,
+                currentVersion = version,
+                downloadState = updateDownloadState,
+                backdrop = dialogBackdrop,
+                onDismiss = onDismissUpdatePopup,
+                onStartDownload = { onStartOtaDownload(updatePopupRelease) },
+                onCancelDownload = onCancelOtaDownload,
+                onInstallApk = onInstallOtaApk,
+                onOpenGitHub = { onOpenUpdateRelease(updatePopupRelease.releaseUrl) },
+            )
         }
     }
 }
 
 @Composable
 private fun AppWhitelistDialog(
+    show: Boolean,
     initialSelected: Set<String>,
+    backdrop: CouiBackdrop,
     onDismiss: () -> Unit,
     onSave: (Set<String>) -> Unit,
 ) {
     val context = LocalContext.current
     val dark = isSystemInDarkTheme()
     val accent = CouiTheme.colorSchemeFor(dark).accent
-    var query by remember { mutableStateOf("") }
+    val haptic = rememberCouiHaptic()
+    val searchState = rememberTextFieldState()
     var selected by remember { mutableStateOf(initialSelected) }
     var installedApps by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    val iconCache = remember { mutableMapOf<String, ImageBitmap>() }
+    val iconSizePx = remember(context) { (36 * context.resources.displayMetrics.density).toInt().coerceAtLeast(48) }
 
-    LaunchedEffect(Unit) {
-        val loaded = withContext(Dispatchers.IO) {
-            val pm = context.packageManager
-            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            val resolved = pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
-            val musicHints = setOf(
-                "music", "spotify", "apple", "soundcloud", "tidal", "deezer", "youtube", "zing",
-                "nhaccuatui", "nct", "square", "poweramp", "neutron", "foobar", "netease", "qqmusic",
-                "kugou", "kuwo", "gramophone", "salt", "oto", "retro", "musicolet", "symfonium", "plexamp",
-            )
-            resolved.asSequence()
-                .mapNotNull { info ->
-                    val pkg = info.activityInfo?.packageName ?: return@mapNotNull null
-                    if (pkg == context.packageName) return@mapNotNull null
-                    val label = info.loadLabel(pm)?.toString()?.trim().takeUnless { it.isNullOrEmpty() } ?: pkg
-                    pkg to label
-                }
-                .distinctBy { it.first }
-                .sortedWith(
-                    compareByDescending<Pair<String, String>> { it.first in initialSelected }
-                        .thenByDescending { (pkg, label) ->
-                            val low = "$pkg $label".lowercase()
-                            musicHints.any { it in low }
-                        }
-                        .thenBy { it.second.lowercase() },
+    LaunchedEffect(show) {
+        if (!show) return@LaunchedEffect
+        selected = initialSelected
+        searchState.clearText()
+        if (installedApps.isEmpty()) {
+            val loaded = withContext(Dispatchers.IO) {
+                val pm = context.packageManager
+                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                val resolved = pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
+                val musicHints = setOf(
+                    "music", "spotify", "apple", "soundcloud", "tidal", "deezer", "youtube", "zing",
+                    "nhaccuatui", "nct", "square", "poweramp", "neutron", "foobar", "netease", "qqmusic",
+                    "kugou", "kuwo", "gramophone", "salt", "oto", "retro", "musicolet", "symfonium", "plexamp",
                 )
-                .toList()
+                resolved.asSequence()
+                    .mapNotNull { info ->
+                        val pkg = info.activityInfo?.packageName ?: return@mapNotNull null
+                        if (pkg == context.packageName) return@mapNotNull null
+                        val label = info.loadLabel(pm)?.toString()?.trim().takeUnless { it.isNullOrEmpty() } ?: pkg
+                        pkg to label
+                    }
+                    .distinctBy { it.first }
+                    .sortedWith(
+                        compareByDescending<Pair<String, String>> { it.first in initialSelected }
+                            .thenByDescending { (pkg, label) ->
+                                val low = "$pkg $label".lowercase()
+                                musicHints.any { it in low }
+                            }
+                            .thenBy { it.second.lowercase() },
+                    )
+                    .toList()
+            }
+            installedApps = loaded
         }
-        installedApps = loaded
     }
 
+    val query = searchState.text.toString()
     val filtered = remember(installedApps, query) {
         val q = query.trim().lowercase()
         if (q.isEmpty()) installedApps
@@ -578,57 +756,53 @@ private fun AppWhitelistDialog(
         }
     }
 
-    ComposeDialog(onDismissRequest = onDismiss) {
-        val surfaceColor = if (dark) Color(0xFF1F2126) else Color(0xFFFDFDFF)
-        val fieldBg = if (dark) Color(0xFF2B2E35) else Color(0xFFF1F3F7)
-        val titleColor = if (dark) Color.White else Color(0xFF111318)
-        val subColor = if (dark) Color(0xFFA0A6B2) else Color(0xFF666D7A)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(surfaceColor)
-                .padding(20.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.app_whitelist_select),
-                style = COUITheme.textStyles.title2,
-                color = titleColor,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(12.dp))
-            Box(
+    if (!show) return
+
+    CouiDialog(
+        onDismissRequest = onDismiss,
+        dark = dark,
+        placement = CouiDialogPlacement.Center,
+        title = stringResource(R.string.app_whitelist_select),
+        material = CouiDialogDefaults.material(dark),
+        backdrop = backdrop,
+        dismissAction = CouiDialogAction(
+            text = stringResource(android.R.string.cancel),
+            onClick = {
+                haptic(CouiHapticEffect.Strength)
+                onDismiss()
+            },
+        ),
+        confirmAction = CouiDialogAction(
+            text = stringResource(R.string.app_whitelist_save),
+            onClick = {
+                haptic(CouiHapticEffect.Strength)
+                onSave(selected)
+            },
+        ),
+    ) {
+        val placeholderBg = COUITheme.colorScheme.surfaceContainer
+        Column(modifier = Modifier.fillMaxWidth()) {
+            TextField(
+                state = searchState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(fieldBg)
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-            ) {
-                if (query.isEmpty()) {
-                    Text(
-                        text = stringResource(R.string.app_whitelist_search),
-                        color = subColor,
-                        style = COUITheme.textStyles.body2,
-                    )
-                }
-                BasicTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    singleLine = true,
-                    textStyle = COUITheme.textStyles.body2.copy(color = titleColor),
-                    cursorBrush = SolidColor(accent),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            val iconCache = remember { mutableMapOf<String, ImageBitmap>() }
-            val iconSizePx = remember(context) { (36 * context.resources.displayMetrics.density).toInt().coerceAtLeast(48) }
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 8.dp),
+                backgroundMode = TextFieldMode.Line,
+                label = stringResource(R.string.app_whitelist_search),
+                useLabelAsPlaceholder = true,
+                showClearButton = true,
+                lineLimits = TextFieldLineLimits.SingleLine,
+            )
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 180.dp, max = 360.dp),
+                    .heightIn(min = 180.dp, max = 340.dp),
             ) {
-                items(filtered, key = { it.first }) { (pkg, label) ->
+                itemsIndexed(filtered, key = { _, item -> item.first }) { index, (pkg, label) ->
+                    if (index > 0) {
+                        HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                    }
                     val checked = pkg in selected
                     val appIcon by produceState<ImageBitmap?>(initialValue = iconCache[pkg], pkg) {
                         if (value == null) {
@@ -650,86 +824,34 @@ private fun AppWhitelistDialog(
                             }
                         }
                     }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable {
-                                selected = if (checked) selected - pkg else selected + pkg
-                            }
-                            .padding(horizontal = 8.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(22.dp)
-                                .clip(CircleShape)
-                                .background(if (checked) accent else fieldBg),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            if (checked) {
-                                Icon(
-                                    painterResource(R.drawable.ic_status_check),
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(14.dp),
+                    CheckboxPreference(
+                        title = label,
+                        summary = pkg,
+                        checked = checked,
+                        onCheckedChange = { isChecked ->
+                            haptic(CouiHapticEffect.Strength)
+                            selected = if (isChecked) selected + pkg else selected - pkg
+                        },
+                        checkboxLocation = CheckboxLocation.End,
+                        insideMargin = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        startAction = {
+                            if (appIcon != null) {
+                                Image(
+                                    bitmap = appIcon!!,
+                                    contentDescription = label,
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(RoundedCornerShape(8.dp)),
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(placeholderBg),
                                 )
                             }
-                        }
-                        if (appIcon != null) {
-                            Image(
-                                bitmap = appIcon!!,
-                                contentDescription = label,
-                                modifier = Modifier
-                                    .size(34.dp)
-                                    .clip(RoundedCornerShape(8.dp)),
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .size(34.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(fieldBg),
-                            )
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = label,
-                                color = titleColor,
-                                style = COUITheme.textStyles.body1,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                text = pkg,
-                                color = subColor,
-                                style = COUITheme.textStyles.body2,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
-            ) {
-                TextButton(
-                    text = stringResource(android.R.string.cancel),
-                    onClick = onDismiss,
-                )
-                Button(
-                    onClick = { onSave(selected) },
-                    colors = ButtonDefaults.buttonColors(color = accent),
-                ) {
-                    Text(
-                        text = stringResource(R.string.app_whitelist_save),
-                        color = Color.White,
-                        style = COUITheme.textStyles.body1,
-                        fontWeight = FontWeight.Medium,
+                        },
                     )
                 }
             }
@@ -741,26 +863,157 @@ private fun AppWhitelistDialog(
 private fun UpdateAvailableDialog(
     release: GitHubUpdates.Result.Latest,
     currentVersion: String,
+    downloadState: GitHubUpdates.DownloadState,
+    backdrop: CouiBackdrop,
     onDismiss: () -> Unit,
-    onDownload: () -> Unit,
+    onStartDownload: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onInstallApk: (File) -> Unit,
+    onOpenGitHub: () -> Unit,
 ) {
+    val context = LocalContext.current
     val dark = isSystemInDarkTheme()
-    val header = stringResource(R.string.update_dialog_message, release.tag, currentVersion)
-    val body = if (release.releaseNotes.isNotBlank()) "$header\n\n${release.releaseNotes}" else header
-    CouiDialog(
-        onDismissRequest = onDismiss,
-        dark = dark,
-        placement = CouiDialogPlacement.Center,
-        title = stringResource(R.string.update_dialog_title),
-        message = body,
-        dismissAction = CouiDialogAction(stringResource(R.string.update_dialog_later), onClick = onDismiss),
-        confirmAction = CouiDialogAction(
-            text = stringResource(R.string.update_dialog_download),
-            style = CouiDialogActionStyle.Primary,
-            colors = CouiDialogDefaults.primaryActionColors(CouiTheme.colorSchemeFor(dark).accent),
-            onClick = onDownload,
-        ),
-    )
+    val accent = CouiTheme.colorSchemeFor(dark).accent
+    val haptic = rememberCouiHaptic()
+    val material = CouiDialogDefaults.material(dark)
+
+    when (downloadState) {
+        GitHubUpdates.DownloadState.Idle -> {
+            val header = stringResource(R.string.update_dialog_message, release.tag, currentVersion)
+            val body = if (release.releaseNotes.isNotBlank()) "$header\n\n${release.releaseNotes}" else header
+            CouiDialog(
+                onDismissRequest = onDismiss,
+                dark = dark,
+                placement = CouiDialogPlacement.Center,
+                title = stringResource(R.string.update_dialog_title),
+                message = body,
+                material = material,
+                backdrop = backdrop,
+                dismissAction = CouiDialogAction(
+                    text = stringResource(R.string.update_dialog_later),
+                    onClick = {
+                        haptic(CouiHapticEffect.Strength)
+                        onDismiss()
+                    },
+                ),
+                confirmAction = CouiDialogAction(
+                    text = stringResource(R.string.update_dialog_download),
+                    style = CouiDialogActionStyle.Primary,
+                    colors = CouiDialogDefaults.primaryActionColors(accent),
+                    onClick = {
+                        haptic(CouiHapticEffect.Strength)
+                        onStartDownload()
+                    },
+                ),
+            )
+        }
+        is GitHubUpdates.DownloadState.Downloading -> {
+            val downloadedText = Formatter.formatShortFileSize(context, downloadState.downloadedBytes)
+            val progressText = if (downloadState.totalBytes > 0L) {
+                val totalText = Formatter.formatShortFileSize(context, downloadState.totalBytes)
+                val percent = ((downloadState.progress ?: 0f) * 100f).toInt().coerceIn(0, 100)
+                stringResource(R.string.update_downloading_progress, downloadedText, totalText, percent)
+            } else {
+                stringResource(R.string.update_downloading_unknown, downloadedText)
+            }
+            CouiDialog(
+                onDismissRequest = onCancelDownload,
+                dark = dark,
+                placement = CouiDialogPlacement.Center,
+                title = stringResource(R.string.update_downloading_title),
+                material = material,
+                backdrop = backdrop,
+                dismissAction = null,
+                confirmAction = CouiDialogAction(
+                    text = stringResource(android.R.string.cancel),
+                    onClick = {
+                        haptic(CouiHapticEffect.Strength)
+                        onCancelDownload()
+                    },
+                ),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = release.tag,
+                        color = COUITheme.colorScheme.onSurface,
+                        style = COUITheme.textStyles.body1,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        progress = downloadState.progress,
+                    )
+                    Text(
+                        text = progressText,
+                        color = COUITheme.colorScheme.onSurfaceSecondary,
+                        style = COUITheme.textStyles.body2,
+                    )
+                }
+            }
+        }
+        is GitHubUpdates.DownloadState.Ready -> {
+            CouiDialog(
+                onDismissRequest = onDismiss,
+                dark = dark,
+                placement = CouiDialogPlacement.Center,
+                title = stringResource(R.string.update_ready_title),
+                message = stringResource(R.string.update_ready_message, release.tag),
+                material = material,
+                backdrop = backdrop,
+                dismissAction = CouiDialogAction(
+                    text = stringResource(R.string.update_dialog_later),
+                    onClick = {
+                        haptic(CouiHapticEffect.Strength)
+                        onDismiss()
+                    },
+                ),
+                confirmAction = CouiDialogAction(
+                    text = stringResource(R.string.update_install_now),
+                    style = CouiDialogActionStyle.Primary,
+                    colors = CouiDialogDefaults.primaryActionColors(accent),
+                    onClick = {
+                        haptic(CouiHapticEffect.Strength)
+                        onInstallApk(downloadState.apkFile)
+                    },
+                ),
+            )
+        }
+        is GitHubUpdates.DownloadState.Failed -> {
+            val detail = downloadState.message?.takeIf { it.isNotBlank() }
+            val baseMsg = stringResource(R.string.update_download_failed_message)
+            val fullMsg = if (detail != null) "$baseMsg\n($detail)" else baseMsg
+            CouiDialog(
+                onDismissRequest = onDismiss,
+                dark = dark,
+                placement = CouiDialogPlacement.Center,
+                title = stringResource(R.string.update_download_failed_title),
+                message = fullMsg,
+                material = material,
+                backdrop = backdrop,
+                dismissAction = CouiDialogAction(
+                    text = stringResource(R.string.update_open_github),
+                    onClick = {
+                        haptic(CouiHapticEffect.Strength)
+                        onOpenGitHub()
+                    },
+                ),
+                confirmAction = CouiDialogAction(
+                    text = stringResource(R.string.update_retry),
+                    style = CouiDialogActionStyle.Primary,
+                    colors = CouiDialogDefaults.primaryActionColors(accent),
+                    onClick = {
+                        haptic(CouiHapticEffect.Strength)
+                        onStartDownload()
+                    },
+                ),
+            )
+        }
+    }
 }
 
 @Composable
@@ -819,6 +1072,7 @@ private fun HomePage(
     bottomClearance: Dp,
     state: TerraMoorApp.State,
     app: TerraMoorApp,
+    onOpenWhitelist: () -> Unit,
 ) {
     val context = LocalContext.current
     val ready = state.connection == Connection.READY
@@ -848,17 +1102,6 @@ private fun HomePage(
     }
     var cacheStats by remember {
         mutableStateOf(shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context))
-    }
-    var showWhitelistDialog by remember { mutableStateOf(false) }
-    if (showWhitelistDialog) {
-        AppWhitelistDialog(
-            initialSelected = state.settings.appWhitelistPackages,
-            onDismiss = { showWhitelistDialog = false },
-            onSave = { selected ->
-                showWhitelistDialog = false
-                app.setAppWhitelist(selected)
-            },
-        )
     }
     DisposableEffect(context) {
         val prefs = context.getSharedPreferences(
@@ -925,10 +1168,12 @@ private fun HomePage(
             )
             HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
             val scope = rememberCoroutineScope()
-            BasicComponent(
+            val haptic = rememberCouiHaptic()
+            ArrowPreference(
                 title = stringResource(R.string.prevent_capsule_collapse),
                 summary = stringResource(R.string.prevent_capsule_collapse_summary),
                 onClick = {
+                    haptic(CouiHapticEffect.Strength)
                     val directOpened = runCatching {
                         context.startActivity(
                             Intent("oplus.fluid.seeding.settings.main").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
@@ -969,12 +1214,24 @@ private fun HomePage(
             if (state.settings.appWhitelistEnabled) {
                 HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
                 val count = state.settings.appWhitelistPackages.size
-                BasicComponent(
+                val colors = COUITheme.colorScheme
+                ArrowPreference(
                     title = stringResource(R.string.app_whitelist_select),
-                    summary = if (count > 0) stringResource(R.string.app_whitelist_selected_count, count)
-                    else stringResource(R.string.app_whitelist_none_selected),
                     enabled = ready,
-                    onClick = { showWhitelistDialog = true },
+                    endActions = {
+                        Text(
+                            text = if (count > 0) stringResource(R.string.app_whitelist_selected_count, count)
+                            else stringResource(R.string.app_whitelist_none_selected),
+                            color = if (ready) colors.onSurfaceSecondary else colors.disabledOnSecondaryVariant,
+                            style = COUITheme.textStyles.body2,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    onClick = {
+                        haptic(CouiHapticEffect.Strength)
+                        onOpenWhitelist()
+                    },
                 )
             }
         }
@@ -1064,6 +1321,7 @@ private fun AboutPage(
     openRepository: () -> Unit,
     updateResult: GitHubUpdates.Result,
     checkForUpdates: () -> Unit,
+    openUpdateDialog: (GitHubUpdates.Result.Latest) -> Unit,
     openReleases: () -> Unit,
     copySupportGroup: () -> Unit,
     canExportDiagnostics: Boolean,
@@ -1096,7 +1354,7 @@ private fun AboutPage(
                 },
             )
             HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
-            UpdatePreference(updateResult, checkForUpdates, openReleases)
+            UpdatePreference(updateResult, checkForUpdates, openUpdateDialog, openReleases)
             HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
             SupportGroupPreference(copySupportGroup)
             HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
@@ -1228,9 +1486,14 @@ private fun SettingsPageTitle(@StringRes title: Int) {
 }
 
 @Composable
-private fun UpdatePreference(result: GitHubUpdates.Result, onCheck: () -> Unit, onOpenReleases: () -> Unit) {
+private fun UpdatePreference(
+    result: GitHubUpdates.Result,
+    onCheck: () -> Unit,
+    onOpenUpdateDialog: (GitHubUpdates.Result.Latest) -> Unit,
+    onOpenReleases: () -> Unit,
+) {
     val checking = result == GitHubUpdates.Result.Checking
-    val hasNewVersion = result is GitHubUpdates.Result.Latest && result.comparison == GitHubUpdates.Comparison.NEWER
+    val newerRelease = (result as? GitHubUpdates.Result.Latest)?.takeIf { it.comparison == GitHubUpdates.Comparison.NEWER }
     val summary = when (result) {
         GitHubUpdates.Result.Idle -> null
         GitHubUpdates.Result.Checking -> stringResource(R.string.update_checking)
@@ -1252,8 +1515,19 @@ private fun UpdatePreference(result: GitHubUpdates.Result, onCheck: () -> Unit, 
             AboutActionButton(stringResource(R.string.check_updates), onCheck, enabled = !checking)
         },
     )
-    if (hasNewVersion) {
-        BasicComponent(title = stringResource(R.string.update_view_release), onClick = onOpenReleases)
+    if (newerRelease != null) {
+        HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+        ArrowPreference(
+            title = stringResource(R.string.update_dialog_download),
+            summary = newerRelease.tag,
+            onClick = {
+                if (!newerRelease.apkDownloadUrl.isNullOrBlank()) {
+                    onOpenUpdateDialog(newerRelease)
+                } else {
+                    onOpenReleases()
+                }
+            },
+        )
     }
 }
 

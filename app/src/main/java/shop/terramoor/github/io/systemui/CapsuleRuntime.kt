@@ -176,6 +176,8 @@ internal class CapsuleRuntime(
 
     fun isAodWhitelistUnlocked(): Boolean = settings.enabled && settings.aodUnlockWhitelist
 
+    fun shouldKeepAodDozeActive(): Boolean = settings.enabled && aodOverlay.isActivelyPlaying
+
     fun bindAodMediaLayout(layout: ViewGroup, nativeRoot: View?) = onMain("AOD layout bind") {
         loadPreferences()
         aodOverlay.bind(layout, nativeRoot)

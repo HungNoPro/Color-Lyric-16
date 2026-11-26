@@ -86,6 +86,9 @@ internal class AodLyricOverlay(
     private var lastCountdown: LyricCountdown? = null
     private var lastArtworkId: Int = 0
     private var lastShowingOverlay: Boolean = false
+    @Volatile
+    var isActivelyPlaying: Boolean = false
+        private set
 
     val isActive: Boolean
         get() {
@@ -128,6 +131,7 @@ internal class AodLyricOverlay(
 
             override fun onViewDetachedFromWindow(v: View) {
                 if (hostRef.get() === v) {
+                    isActivelyPlaying = false
                     dotsView?.stopWave()
                     cancelDozeWakeup()
                     releaseDozeWakeLocks()
@@ -148,10 +152,10 @@ internal class AodLyricOverlay(
         }
         val context = host.context
         val density = context.resources.displayMetrics.density
-        val padH = (20f * density).toInt()
-        val padTop = (12f * density).toInt()
-        val padBottom = (14f * density).toInt()
-        val coverSize = (30f * density).toInt()
+        val padH = (4f * density).toInt()
+        val padTop = (6f * density).toInt()
+        val padBottom = (8f * density).toInt()
+        val coverSize = (28f * density).toInt()
         val coverRadius = 7f * density
 
         val mediumTypeface = runCatching {
@@ -234,17 +238,17 @@ internal class AodLyricOverlay(
             visibility = View.GONE
         }
         val main = TextView(context).apply {
-            gravity = Gravity.CENTER
+            gravity = Gravity.START
             includeFontPadding = false
             typeface = mediumTypeface
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
             setTextColor(0xFFFFFFFF.toInt())
             maxLines = 3
             ellipsize = TextUtils.TruncateAt.END
-            setLineSpacing(0f, 1.18f)
+            setLineSpacing(0f, 1.15f)
         }
         val translation = TextView(context).apply {
-            gravity = Gravity.CENTER
+            gravity = Gravity.START
             includeFontPadding = false
             typeface = regularTypeface
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -255,7 +259,7 @@ internal class AodLyricOverlay(
             visibility = View.GONE
         }
         val next = TextView(context).apply {
-            gravity = Gravity.CENTER
+            gravity = Gravity.START
             includeFontPadding = false
             typeface = regularTypeface
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -268,7 +272,7 @@ internal class AodLyricOverlay(
 
         val stage = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
+            gravity = Gravity.START
             addView(
                 dots,
                 LinearLayout.LayoutParams(
@@ -306,7 +310,7 @@ internal class AodLyricOverlay(
         val root = LinearLayout(context).apply {
             tag = OVERLAY_TAG
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
+            gravity = Gravity.CENTER
             setPadding(padH, padTop, padH, padBottom)
             isClickable = false
             isFocusable = false
@@ -320,7 +324,7 @@ internal class AodLyricOverlay(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply {
                     gravity = Gravity.CENTER_HORIZONTAL
-                    bottomMargin = (10f * density).toInt()
+                    bottomMargin = (8f * density).toInt()
                 },
             )
             addView(
@@ -334,15 +338,11 @@ internal class AodLyricOverlay(
 
         host.clipChildren = false
         host.clipToPadding = false
-        (host.parent as? ViewGroup)?.let { p ->
-            p.clipChildren = false
-            p.clipToPadding = false
-        }
         host.addView(
             root,
             ViewGroup.MarginLayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
             ),
         )
 
@@ -412,6 +412,7 @@ internal class AodLyricOverlay(
         val showOverlay = enabled && (cleanMain != null || countdown != null)
 
         if (!showOverlay) {
+            isActivelyPlaying = false
             dotsView?.stopWave()
             val changed = lastShowingOverlay || root.visibility != View.GONE
             if (changed) {
@@ -456,8 +457,10 @@ internal class AodLyricOverlay(
 
         // Hold DRAW_WAKE_LOCK steadily across active playback lines so the LTPO display stays
         // smoothly in STATE_DOZE without toggling STATE_DOZE_SUSPEND <-> STATE_DOZE (which flashes).
-        if (playing && isActive) {
-            val holdMs = ((nextLineDelayMs ?: 8_000L) + 1_500L).coerceIn(3_000L, STEADY_DOZE_HOLD_MAX_MS)
+        val activePlaying = playing && isActive
+        isActivelyPlaying = activePlaying
+        if (activePlaying) {
+            val holdMs = ((nextLineDelayMs ?: 12_000L) + 3_000L).coerceIn(5_000L, STEADY_DOZE_HOLD_MAX_MS)
             acquireSteadyDrawWakeLock(holdMs)
         } else if (changed) {
             acquireBriefDrawWakeLock()
@@ -538,11 +541,12 @@ internal class AodLyricOverlay(
         lastShowingOverlay = true
 
         if (changed) {
-            root.requestLayout()
+            if (enteringOverlay) {
+                root.requestLayout()
+                host.requestLayout()
+            }
             root.invalidate()
-            host.requestLayout()
             host.invalidate()
-            (host.parent as? View)?.invalidate()
         }
     }
 
@@ -576,12 +580,14 @@ internal class AodLyricOverlay(
     }
 
     fun onAodHidden() {
+        isActivelyPlaying = false
         dotsView?.stopWave()
         cancelDozeWakeup()
         releaseDozeWakeLocks()
     }
 
     fun restoreNative() {
+        isActivelyPlaying = false
         dotsView?.stopWave()
         cancelDozeWakeup()
         releaseDozeWakeLocks()
@@ -631,10 +637,22 @@ internal class AodLyricOverlay(
         runCatching { alarmManager?.cancel(listener) }
     }
 
+    private fun hasVisibleSibling(host: ViewGroup): Boolean {
+        val parent = host.parent as? ViewGroup ?: return false
+        for (i in 0 until parent.childCount) {
+            val child = parent.getChildAt(i)
+            if (child === host) continue
+            if (child.visibility == View.VISIBLE && (child.width > 0 || child.height > 0)) {
+                return true
+            }
+        }
+        return false
+    }
+
     private fun expandHostForOverlay(host: ViewGroup) {
         val lp = host.layoutParams ?: return
         val screenWidth = host.resources.displayMetrics.widthPixels
-        val targetWidth = (screenWidth * CARD_WIDTH_FRACTION).toInt()
+        val density = host.resources.displayMetrics.density
         if (savedHostHeight == null) {
             savedHostWidth = lp.width
             savedHostHeight = lp.height
@@ -644,30 +662,49 @@ internal class AodLyricOverlay(
             savedHostForeground = host.foreground
             savedHostWillNotDraw = host.willNotDraw()
         }
-        val parent = host.parent as? ViewGroup
-        val parentLp = parent?.layoutParams
-        if (parent != null) {
-            if (savedParentRef.get() == null) {
-                savedParentRef = WeakReference(parent)
-                savedParentWidth = parentLp?.width
-                savedParentBackground = parent.background
-                savedParentForeground = parent.foreground
-            }
-            if (parentLp != null && parent.width in 1 until targetWidth &&
-                parentLp.width != ViewGroup.LayoutParams.MATCH_PARENT && parentLp.width < screenWidth
-            ) {
-                parentLp.width = ViewGroup.LayoutParams.MATCH_PARENT
-                parent.layoutParams = parentLp
-            }
-        }
 
+        // Never widen host.parent; only size host safely within its parent's available width, and
+        // keep a constant fixed height (172dp) so lyric line changes never trigger AodClockLayout
+        // re-layout (which causes sibling AOD cards like Google Maps to flicker/reset) while still
+        // giving full room for header + 2-line main + 2-line translation/next.
+        val siblingPresent = hasVisibleSibling(host)
         var layoutChanged = false
-        if (lp.width != targetWidth && targetWidth > 0) {
-            lp.width = targetWidth
-            layoutChanged = true
+        if (siblingPresent) {
+            val origW = savedHostWidth
+            if (origW != null && lp.width != origW) {
+                lp.width = origW
+                layoutChanged = true
+            }
+            val origTx = savedHostTranslationX ?: 0f
+            if (kotlin.math.abs(host.translationX - origTx) > 0.5f) {
+                host.translationX = origTx
+            }
+        } else {
+            val parent = host.parent as? ViewGroup
+            val targetWidth = (screenWidth * CARD_WIDTH_FRACTION).toInt()
+            if (parent != null) {
+                val pLp = parent.layoutParams
+                if (savedParentRef.get() == null) {
+                    savedParentRef = WeakReference(parent)
+                    savedParentWidth = pLp?.width
+                    savedParentBackground = parent.background
+                    savedParentForeground = parent.foreground
+                }
+                if (pLp != null && parent.width in 1 until targetWidth &&
+                    pLp.width != ViewGroup.LayoutParams.MATCH_PARENT && pLp.width < screenWidth
+                ) {
+                    pLp.width = ViewGroup.LayoutParams.MATCH_PARENT
+                    parent.layoutParams = pLp
+                }
+            }
+            if (lp.width != targetWidth && targetWidth > 0) {
+                lp.width = targetWidth
+                layoutChanged = true
+            }
         }
-        if (lp.height != ViewGroup.LayoutParams.WRAP_CONTENT) {
-            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+        val fixedHeight = (196f * density).toInt()
+        if (lp.height != fixedHeight) {
+            lp.height = fixedHeight
             layoutChanged = true
         }
         if (layoutChanged) {
@@ -676,17 +713,28 @@ internal class AodLyricOverlay(
         if (host.minimumHeight != 0) {
             host.minimumHeight = 0
         }
-        if (host.width > 0) {
+        if (!siblingPresent && host.width > 0) {
             centerHostHorizontally(host, host.width, host.left)
         }
     }
 
     private fun centerHostHorizontally(host: ViewGroup, hostWidth: Int, hostLeft: Int) {
         if (hostWidth <= 0) return
-        val parentWidth = (host.parent as? View)?.width?.takeIf { it > 0 }
-            ?: host.resources.displayMetrics.widthPixels
-        val desiredLeft = (parentWidth - hostWidth) / 2f
-        val tx = desiredLeft - hostLeft
+        if (hasVisibleSibling(host)) {
+            val origTx = savedHostTranslationX ?: 0f
+            if (kotlin.math.abs(host.translationX - origTx) > 0.5f) {
+                host.translationX = origTx
+            }
+            return
+        }
+        val screenWidth = host.resources.displayMetrics.widthPixels
+        if (screenWidth <= 0 || hostWidth > screenWidth) return
+        val parent = host.parent as? View
+        val parentLoc = IntArray(2)
+        parent?.getLocationOnScreen(parentLoc)
+        val parentScreenLeft = if (parent != null) parentLoc[0] else 0
+        val desiredScreenLeft = (screenWidth - hostWidth) / 2f
+        val tx = desiredScreenLeft - (parentScreenLeft + hostLeft)
         if (kotlin.math.abs(host.translationX - tx) > 0.5f) {
             host.translationX = tx
         }
@@ -702,8 +750,10 @@ internal class AodLyricOverlay(
             host.foreground = null
         }
         if (!host.willNotDraw()) host.setWillNotDraw(true)
+        // Clear the dedicated media card wrapper's border/background only when it has no visible
+        // sibling cards (so Google Maps / other AOD Live Alerts are never touched).
         val parent = host.parent as? ViewGroup
-        if (parent != null) {
+        if (parent != null && !hasVisibleSibling(host)) {
             if (savedParentRef.get() == null) savedParentRef = WeakReference(parent)
             if (parent.background != null) {
                 if (savedParentBackground == null) savedParentBackground = parent.background
@@ -883,14 +933,14 @@ internal class AodLyricOverlay(
         const val TAG = "TerraMoor"
         const val OVERLAY_TAG = "colorlyric_aod_overlay"
         const val ALARM_TAG = "ColorLyricAodTick"
-        const val CARD_WIDTH_FRACTION = 0.90f
+        const val CARD_WIDTH_FRACTION = 0.88f
         const val WAVE_CYCLE_MS = 1_700L
         const val OVERLAY_ENTRY_DURATION_MS = 340L
         const val LINE_SLIDE_DURATION_MS = 280L
         val SLIDE_INTERPOLATOR = DecelerateInterpolator(2.0f)
         // Hidden PowerManager.DRAW_WAKE_LOCK level that permits frame submission while dozing.
         const val DRAW_WAKE_LOCK_LEVEL = 0x80
-        const val STEADY_DOZE_HOLD_MAX_MS = 18_000L
+        const val STEADY_DOZE_HOLD_MAX_MS = 30_000L
         const val BRIEF_DRAW_LOCK_MS = 800L
         const val BRIEF_CPU_LOCK_MS = 600L
     }

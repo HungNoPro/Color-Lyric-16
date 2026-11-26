@@ -204,6 +204,18 @@ class TerraMoorModule : XposedModule() {
                     runtime.aodHooked = true
                 }
             }
+            installOptional(hooks, "AOD DozeService steady-doze anti-flicker hook") {
+                val dozeCls = param.classLoader.loadClass("com.android.systemui.doze.DozeService")
+                val setState = dozeCls.getMethod("setDozeScreenState", Int::class.javaPrimitiveType)
+                hook(setState).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    val state = chain.args.firstOrNull() as? Int
+                    if (state == android.view.Display.STATE_DOZE_SUSPEND && runtime.shouldKeepAodDozeActive()) {
+                        null
+                    } else {
+                        chain.proceed()
+                    }
+                }
+            }
             installOptional(hooks, "AOD AodRootLayout visibility lifecycle hook") {
                 val rootCls = param.classLoader.loadClass("com.oplus.systemui.aod.aodclock.off.AodRootLayout")
                 val ctor = rootCls.getDeclaredConstructor(

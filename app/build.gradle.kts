@@ -13,8 +13,8 @@ android {
         applicationId = "com.hungnopro.coslrc16"
         minSdk = 34
         targetSdk = 37
-        versionCode = 9
-        versionName = "1.1.7"
+        versionCode = 10
+        versionName = "1.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
