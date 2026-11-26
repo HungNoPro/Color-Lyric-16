@@ -204,6 +204,32 @@ class TerraMoorModule : XposedModule() {
                     runtime.aodHooked = true
                 }
             }
+            installOptional(hooks, "AOD AodRootLayout visibility lifecycle hook") {
+                val rootCls = param.classLoader.loadClass("com.oplus.systemui.aod.aodclock.off.AodRootLayout")
+                val ctor = rootCls.getDeclaredConstructor(
+                    android.content.Context::class.java,
+                    android.util.AttributeSet::class.java,
+                    Int::class.javaPrimitiveType,
+                )
+                hook(ctor).setExceptionMode(ExceptionMode.PROTECTIVE).intercept { chain ->
+                    val res = chain.proceed()
+                    val v = chain.thisObject as? android.view.ViewGroup
+                    if (v != null) {
+                        var lastVisible = false
+                        v.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+                            val nowVisible = view.visibility == android.view.View.VISIBLE && view.isShown
+                            if (nowVisible) {
+                                lastVisible = true
+                                runtime.onAodRootVisibilityChanged(true)
+                            } else if (lastVisible) {
+                                lastVisible = false
+                                runtime.onAodRootVisibilityChanged(false)
+                            }
+                        }
+                    }
+                    res
+                }
+            }
             installOptional(hooks, "AOD AodMediaViewHolder live lyrics hook") {
                 val vhCls = param.classLoader.loadClass("com.oplusos.systemui.aod.mediapanel.AodMediaViewHolder")
                 val ctor = vhCls.declaredConstructors.firstOrNull { it.parameterCount == 2 }

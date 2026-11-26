@@ -90,7 +90,7 @@ internal class AodLyricOverlay(
     val isActive: Boolean
         get() {
             val host = hostRef.get() ?: return false
-            return host.isAttachedToWindow && host.visibility == View.VISIBLE
+            return host.isAttachedToWindow && host.isShown
         }
 
     fun bind(host: ViewGroup, nativeRoot: View?, nativeAlbum: ImageView? = null) {
@@ -573,6 +573,12 @@ internal class AodLyricOverlay(
             .setDuration(LINE_SLIDE_DURATION_MS)
             .setInterpolator(SLIDE_INTERPOLATOR)
             .start()
+    }
+
+    fun onAodHidden() {
+        dotsView?.stopWave()
+        cancelDozeWakeup()
+        releaseDozeWakeLocks()
     }
 
     fun restoreNative() {

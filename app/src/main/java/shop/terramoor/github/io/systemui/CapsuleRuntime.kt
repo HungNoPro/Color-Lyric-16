@@ -177,15 +177,27 @@ internal class CapsuleRuntime(
     fun isAodWhitelistUnlocked(): Boolean = settings.enabled && settings.aodUnlockWhitelist
 
     fun bindAodMediaLayout(layout: ViewGroup, nativeRoot: View?) = onMain("AOD layout bind") {
-        Log.i(TAG, "[AOD] bindAodMediaLayout: ${layout.javaClass.name}, attached=${layout.isAttachedToWindow}, vis=${layout.visibility}")
+        loadPreferences()
         aodOverlay.bind(layout, nativeRoot)
+        ensureSessionForAodOrLockscreen()
         renderAodOnly()
     }
 
     fun onAodMediaLayoutVisible(layout: ViewGroup, nativeRoot: View?) = onMain("AOD layout visible") {
-        Log.i(TAG, "[AOD] onAodMediaLayoutVisible: ${layout.javaClass.name}, attached=${layout.isAttachedToWindow}, vis=${layout.visibility}")
+        loadPreferences()
         aodOverlay.bind(layout, nativeRoot)
+        ensureSessionForAodOrLockscreen()
         renderAodOnly()
+    }
+
+    fun onAodRootVisibilityChanged(visible: Boolean) = onMain("AOD visibility") {
+        if (visible) {
+            loadPreferences()
+            ensureSessionForAodOrLockscreen()
+            renderAodOnly()
+        } else {
+            aodOverlay.onAodHidden()
+        }
     }
 
     fun bindAodMediaViews(
@@ -195,11 +207,13 @@ internal class CapsuleRuntime(
         title: android.widget.TextView?,
         artist: android.widget.TextView?,
     ) = onMain("AOD media bind") {
+        loadPreferences()
         if (player != null) {
             aodOverlay.bind(player, playerContainer, albumView)
         }
         if (title != null) aodTitleView = WeakReference(title)
         if (artist != null) aodArtistView = WeakReference(artist)
+        ensureSessionForAodOrLockscreen()
         renderAodOnly()
     }
 
@@ -436,8 +450,10 @@ internal class CapsuleRuntime(
         if (sent || mediaController.get() === instance || mediaController.get() == null) {
             mediaController = WeakReference(instance)
             dispatched = notification
+            loadPreferences()
             if (settings.enabled) {
                 readMedia()
+                ensureSessionForAodOrLockscreen()
                 postRefresh()
             }
         }
@@ -777,10 +793,10 @@ internal class CapsuleRuntime(
     }
 
     private fun loadPreferences() {
-        val view = hostView ?: return
+        val appCtx = hostView?.context?.applicationContext ?: resolveAppContext() ?: return
         if (!settingsUpdateRegistered) {
             try {
-                CapsuleSettingsUpdate.register(view.context.applicationContext, modulePackage, main) { next ->
+                CapsuleSettingsUpdate.register(appCtx, modulePackage, main) { next ->
                     receivedCommittedSettings = true
                     main.removeCallbacks(applyPreferences)
                     trace("preferences", "COMMIT_RECEIVED")
@@ -888,6 +904,42 @@ internal class CapsuleRuntime(
         mediaMissingSince = null
     }
 
+    private fun ensureSessionForAodOrLockscreen() {
+        if (!settings.enabled || session != null) return
+        val appCtx = hostView?.context?.applicationContext ?: resolveAppContext() ?: return
+        val candidate = media?.takeUnless { it.token == destroyedToken }
+        if (candidate != null && settings.allowsApp(candidate.owner)) {
+            val controller = runCatching { MediaController(appCtx, candidate.token) }.getOrNull()
+            if (controller != null && controller.packageName == candidate.owner) {
+                val watch = Session(candidate.token, controller)
+                session = watch
+                controller.registerCallback(watch, main)
+                watch.metadataChanged(controller.metadata)
+                watch.playbackChanged(controller.playbackState)
+                return
+            }
+        }
+        val msm = runCatching {
+            appCtx.getSystemService(android.media.session.MediaSessionManager::class.java)
+        }.getOrNull() ?: return
+        val controllers = runCatching { msm.getActiveSessions(null) }.getOrNull().orEmpty()
+        val chosen = controllers.firstOrNull { c ->
+            c.sessionToken != destroyedToken &&
+                settings.allowsApp(c.packageName) &&
+                c.playbackState?.state == PlaybackState.STATE_PLAYING &&
+                !c.metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).isNullOrBlank()
+        } ?: controllers.firstOrNull { c ->
+            c.sessionToken != destroyedToken &&
+                settings.allowsApp(c.packageName) &&
+                !c.metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).isNullOrBlank()
+        } ?: return
+        val watch = Session(chosen.sessionToken, chosen)
+        session = watch
+        chosen.registerCallback(watch, main)
+        watch.metadataChanged(chosen.metadata)
+        watch.playbackChanged(chosen.playbackState)
+    }
+
     private fun postRefresh() {
         if (settings.enabled && !main.hasCallbacks(refresh)) main.post(refresh)
     }
@@ -942,6 +994,8 @@ internal class CapsuleRuntime(
         }
         if (candidate == null || target == null) {
             clearLabels()
+            ensureSessionForAodOrLockscreen()
+            renderAodOnly()
             setStatus(if (candidate == null) "Waiting for native media notification" else "Native media capsule not visible")
             return
         }
@@ -1363,7 +1417,7 @@ internal class CapsuleRuntime(
             val task = Runnable {
                 pendingOnlineFetch = null
                 if (session !== this || trackSequence != seq || timeline != null) return@Runnable
-                val ctx = hostView?.context?.applicationContext ?: return@Runnable
+                val ctx = hostView?.context?.applicationContext ?: resolveAppContext() ?: return@Runnable
                 onlineFetchSeq = seq
                 val uri = android.net.Uri.parse("content://$modulePackage${LyricBridgeProvider.AUTHORITY_SUFFIX}")
                 val args = android.os.Bundle().apply {
@@ -1411,7 +1465,7 @@ internal class CapsuleRuntime(
             if (!settings.autoTranslateVi) return
             if (onlineTranslateSeq == seq) return
             if (current.lines.isEmpty() || current.lines.any { !it.translation.isNullOrBlank() }) return
-            val ctx = hostView?.context?.applicationContext ?: return
+            val ctx = hostView?.context?.applicationContext ?: resolveAppContext() ?: return
             onlineTranslateSeq = seq
             val lineTexts = ArrayList<String>(current.lines.size).apply {
                 current.lines.forEach { add(it.text) }
