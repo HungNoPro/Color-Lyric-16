@@ -27,6 +27,7 @@ import shop.terramoor.github.io.R
 internal enum class SettingsTab(@StringRes val title: Int) {
     HOME(R.string.tab_home),
     TUNING(R.string.tab_tuning),
+    LYRICS(R.string.tab_lyrics),
     ABOUT(R.string.tab_about),
 }
 
@@ -36,9 +37,8 @@ internal fun FloatingTabBar(selected: SettingsTab, onSelect: (SettingsTab) -> Bo
     val tabs = SettingsTab.entries
     var selectionReset by remember { mutableIntStateOf(0) }
     BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
-        // COUI Kit reserves 68dp at each end for optional attachments. Keep the
-        // capsule itself at LuckyTool's compact item width, even without attachments.
-        val itemWidth = 52.dp
+        // COUI subtracts its outer padding and both attachment slots even when the slots are hidden.
+        val itemWidth = 64.dp
         val outerPadding = 32.dp
         val attachmentSpace = 136.dp
         val menuWidth = (24.dp + itemWidth * tabs.size + 8.dp * (tabs.size - 1))
@@ -66,5 +66,6 @@ internal fun FloatingTabBar(selected: SettingsTab, onSelect: (SettingsTab) -> Bo
 private fun tabIcon(tab: SettingsTab): ImageVector = when (tab) {
     SettingsTab.HOME -> ImageVector.vectorResource(R.drawable.ic_tab_home)
     SettingsTab.TUNING -> CouiIcons.Outlined.SliderCustom
+    SettingsTab.LYRICS -> ImageVector.vectorResource(R.drawable.ic_lyrics_provider)
     SettingsTab.ABOUT -> ImageVector.vectorResource(R.drawable.ic_tab_about)
 }

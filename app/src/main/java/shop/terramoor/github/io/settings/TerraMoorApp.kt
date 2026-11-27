@@ -138,6 +138,7 @@ class TerraMoorApp : Application(), XposedServiceHelper.OnServiceListener {
             CapsuleSettings.SHOW_WAVEFORM -> current.copy(showWaveform = checked)
             CapsuleSettings.CAMERA_FADE -> current.copy(cameraFade = checked)
             CapsuleSettings.FALLBACK_SINGLE_LINE_EXPAND -> current.copy(fallbackSingleLineExpand = checked)
+            CapsuleSettings.INTERPOLATE_WORD_LYRICS -> current.copy(interpolateWordLyrics = checked)
             CapsuleSettings.AUTO_TRANSLATE_VI -> current.copy(autoTranslateVi = checked)
             CapsuleSettings.LOCKSCREEN_BRIDGE -> current.copy(lockscreenBridge = checked)
             CapsuleSettings.AOD_UNLOCK_WHITELIST -> current.copy(aodUnlockWhitelist = checked)

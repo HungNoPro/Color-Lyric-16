@@ -146,6 +146,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import shop.terramoor.github.io.R
 import shop.terramoor.github.io.settings.TerraMoorApp.Connection
+import shop.terramoor.github.io.settings.coui.TagView
+import shop.terramoor.github.io.settings.coui.TagViewDefaults
 import kotlin.math.abs
 
 class SettingsActivity : ComponentActivity() {
@@ -648,7 +650,6 @@ private fun SettingsPage(
                         when (tab) {
                             SettingsTab.HOME -> HomePage(
                                 Modifier.fillMaxSize(), bottomClearance, state, app,
-                                onOpenWhitelist = { showWhitelistDialog = true },
                             )
                             SettingsTab.TUNING -> {
                                 val visible by remember(pager, page) {
@@ -657,6 +658,10 @@ private fun SettingsPage(
                                 TuningPage(Modifier.fillMaxSize(), bottomClearance, background, state, app, visible,
                                     translationHelpHidden, onHideTranslationHelp)
                             }
+                            SettingsTab.LYRICS -> LyricsPage(
+                                Modifier.fillMaxSize(), bottomClearance, state, app,
+                                onOpenWhitelist = { showWhitelistDialog = true },
+                            )
                             SettingsTab.ABOUT -> AboutPage(
                                 Modifier.fillMaxSize(), bottomClearance, version, canUseBackup, onExport, onImport,
                                 openRepository, updateResult, checkForUpdates, openUpdateDialog, openReleases, copySupportGroup,
@@ -1072,7 +1077,6 @@ private fun HomePage(
     bottomClearance: Dp,
     state: TerraMoorApp.State,
     app: TerraMoorApp,
-    onOpenWhitelist: () -> Unit,
 ) {
     val context = LocalContext.current
     val ready = state.connection == Connection.READY
@@ -1083,25 +1087,8 @@ private fun HomePage(
         Connection.READY -> R.string.status_ready to null
         Connection.FAILED -> R.string.status_failed to R.string.status_failed_hint
     }
-    val sourceOptions = listOf(
-        LyricSourceMode.AUTO to stringResource(R.string.source_auto),
-        LyricSourceMode.APPLE_MUSIC to stringResource(R.string.source_apple_music),
-        LyricSourceMode.BETTER_LYRICS to stringResource(R.string.source_better_lyrics),
-        LyricSourceMode.LRCLIB to stringResource(R.string.source_lrclib),
-        LyricSourceMode.KUGOU to stringResource(R.string.source_kugou),
-        LyricSourceMode.LYRICS_OVH to stringResource(R.string.source_lyrics_ovh),
-        LyricSourceMode.EXTERNAL_ONLY to stringResource(R.string.source_external_only),
-    )
-    val selectedSourceIndex = sourceOptions.indexOfFirst { it.first == state.settings.lyricSourceMode }.coerceAtLeast(0)
-    val langOptions = TranslateTargetLang.entries.map { lang ->
-        lang to if (lang == TranslateTargetLang.SYSTEM) stringResource(R.string.translate_lang_system) else lang.label
-    }
-    val selectedLangIndex = langOptions.indexOfFirst { it.first == state.settings.translateTargetLang }.coerceAtLeast(0)
     var hookStatus by remember {
         mutableStateOf(shop.terramoor.github.io.lyrics.LyricBridgeProvider.readHookStatus(context))
-    }
-    var cacheStats by remember {
-        mutableStateOf(shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context))
     }
     DisposableEffect(context) {
         val prefs = context.getSharedPreferences(
@@ -1109,7 +1096,6 @@ private fun HomePage(
             android.content.Context.MODE_PRIVATE,
         )
         hookStatus = shop.terramoor.github.io.lyrics.LyricBridgeProvider.readHookStatus(context)
-        cacheStats = shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context)
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             hookStatus = shop.terramoor.github.io.lyrics.LyricBridgeProvider.readHookStatus(context)
         }
@@ -1203,7 +1189,209 @@ private fun HomePage(
                     }
                 },
             )
+        }
+        SettingsGroup(stringResource(R.string.section_lockscreen_aod)) {
+            TactileSwitchPreference(
+                checked = state.settings.lockscreenBridge,
+                onCheckedChange = { app.set(CapsuleSettings.LOCKSCREEN_BRIDGE, it) },
+                title = stringResource(R.string.lockscreen_bridge),
+                summary = stringResource(R.string.lockscreen_bridge_summary),
+                enabled = ready && state.settings.enabled,
+            )
             HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+            TactileSwitchPreference(
+                checked = state.settings.aodUnlockWhitelist,
+                onCheckedChange = { app.set(CapsuleSettings.AOD_UNLOCK_WHITELIST, it) },
+                title = stringResource(R.string.aod_unlock_whitelist),
+                summary = stringResource(R.string.aod_unlock_whitelist_summary),
+                enabled = ready && state.settings.enabled && state.settings.lockscreenBridge,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LyricsPage(
+    modifier: Modifier,
+    bottomClearance: Dp,
+    state: TerraMoorApp.State,
+    app: TerraMoorApp,
+    onOpenWhitelist: () -> Unit,
+) {
+    val context = LocalContext.current
+    val ready = state.connection == Connection.READY
+    val haptic = rememberCouiHaptic()
+    val sourceOptions = listOf(
+        LyricSourceMode.AUTO to stringResource(R.string.source_auto),
+        LyricSourceMode.APPLE_MUSIC to stringResource(R.string.source_apple_music),
+        LyricSourceMode.BETTER_LYRICS to stringResource(R.string.source_better_lyrics),
+        LyricSourceMode.LRCLIB to stringResource(R.string.source_lrclib),
+        LyricSourceMode.KUGOU to stringResource(R.string.source_kugou),
+        LyricSourceMode.LYRICS_OVH to stringResource(R.string.source_lyrics_ovh),
+        LyricSourceMode.EXTERNAL_ONLY to stringResource(R.string.source_external_only),
+    )
+    val selectedSourceIndex = sourceOptions.indexOfFirst { it.first == state.settings.lyricSourceMode }.coerceAtLeast(0)
+    val langOptions = TranslateTargetLang.entries.map { lang ->
+        lang to if (lang == TranslateTargetLang.SYSTEM) stringResource(R.string.translate_lang_system) else lang.label
+    }
+    val selectedLangIndex = langOptions.indexOfFirst { it.first == state.settings.translateTargetLang }.coerceAtLeast(0)
+    var cacheStats by remember {
+        mutableStateOf(shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context))
+    }
+    var nowPlaying by remember {
+        mutableStateOf(shop.terramoor.github.io.lyrics.LyricBridgeProvider.readNowPlaying(context))
+    }
+    var nowPlayingCover by remember {
+        mutableStateOf(shop.terramoor.github.io.lyrics.LyricBridgeProvider.readNowPlayingCover(context)?.asImageBitmap())
+    }
+    DisposableEffect(context) {
+        val prefs = context.getSharedPreferences(
+            shop.terramoor.github.io.lyrics.LyricBridgeProvider.NOW_PLAYING_PREFS,
+            android.content.Context.MODE_PRIVATE,
+        )
+        cacheStats = shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context)
+        nowPlaying = shop.terramoor.github.io.lyrics.LyricBridgeProvider.readNowPlaying(context)
+        nowPlayingCover = shop.terramoor.github.io.lyrics.LyricBridgeProvider.readNowPlayingCover(context)?.asImageBitmap()
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            nowPlaying = shop.terramoor.github.io.lyrics.LyricBridgeProvider.readNowPlaying(context)
+            nowPlayingCover = shop.terramoor.github.io.lyrics.LyricBridgeProvider.readNowPlayingCover(context)?.asImageBitmap()
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
+    val dark = isSystemInDarkTheme()
+    val accent = CouiTheme.colorSchemeFor(dark).accent
+    val sourceTagLabel = formatNowPlayingSource(nowPlaying.source)
+
+    SettingsList(modifier, bottomClearance) {
+        SettingsPageTitle(R.string.lyrics_page_title)
+        SettingsGroup(stringResource(R.string.section_now_playing)) {
+            val hasTrack = nowPlaying.title.isNotBlank()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                val cover = nowPlayingCover
+                if (hasTrack && cover != null) {
+                    Image(
+                        bitmap = cover,
+                        contentDescription = nowPlaying.title,
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(12.dp)),
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(COUITheme.colorScheme.surfaceContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_lyrics_provider),
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp),
+                            tint = COUITheme.colorScheme.onSurfaceSecondary,
+                        )
+                    }
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(
+                        text = if (hasTrack) nowPlaying.title else stringResource(R.string.now_playing_idle),
+                        color = COUITheme.colorScheme.onSurface,
+                        style = COUITheme.textStyles.body1,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (hasTrack && nowPlaying.artist.isNotBlank()) {
+                        Text(
+                            text = nowPlaying.artist,
+                            color = COUITheme.colorScheme.onSurfaceSecondary,
+                            style = COUITheme.textStyles.body2,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (hasTrack) {
+                        Row(
+                            modifier = Modifier.padding(top = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            TagView(
+                                text = sourceTagLabel,
+                                insideMargin = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                colors = TagViewDefaults.tagViewColors(
+                                    containerColor = if (nowPlaying.source.isNotBlank()) accent.copy(alpha = 0.14f)
+                                    else COUITheme.colorScheme.surfaceContainer,
+                                    contentColor = if (nowPlaying.source.isNotBlank()) accent
+                                    else COUITheme.colorScheme.onSurfaceSecondary,
+                                ),
+                            )
+                            if (nowPlaying.wordTimed) {
+                                TagView(
+                                    text = stringResource(R.string.now_playing_word_timed),
+                                    insideMargin = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                    colors = TagViewDefaults.tagViewColors(
+                                        containerColor = COUITheme.colorScheme.surfaceContainer,
+                                        contentColor = COUITheme.colorScheme.onSurfaceSecondary,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SettingsGroup(stringResource(R.string.section_lyrics_source)) {
+            TuningDropdown(
+                title = stringResource(R.string.lyric_source_mode),
+                items = sourceOptions.map { it.second },
+                selectedIndex = selectedSourceIndex,
+                enabled = ready,
+                onSelectedIndexChange = { idx ->
+                    sourceOptions.getOrNull(idx)?.first?.let(app::setLyricSourceMode)
+                },
+            )
+            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+            TactileSwitchPreference(
+                checked = state.settings.interpolateWordLyrics,
+                onCheckedChange = { app.set(CapsuleSettings.INTERPOLATE_WORD_LYRICS, it) },
+                title = stringResource(R.string.interpolate_word_lyrics),
+                summary = stringResource(R.string.interpolate_word_lyrics_summary),
+                enabled = ready,
+            )
+            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+            TactileSwitchPreference(
+                checked = state.settings.autoTranslateVi,
+                onCheckedChange = { app.set(CapsuleSettings.AUTO_TRANSLATE_VI, it) },
+                title = stringResource(R.string.auto_translate_vi),
+                summary = stringResource(R.string.auto_translate_vi_summary),
+                enabled = ready,
+            )
+            if (state.settings.autoTranslateVi) {
+                HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+                TuningDropdown(
+                    title = stringResource(R.string.translate_target_lang),
+                    items = langOptions.map { it.second },
+                    selectedIndex = selectedLangIndex,
+                    enabled = ready,
+                    onSelectedIndexChange = { idx ->
+                        langOptions.getOrNull(idx)?.first?.let(app::setTranslateTargetLang)
+                    },
+                )
+            }
+        }
+        SettingsGroup(stringResource(R.string.section_lyrics_players)) {
             TactileSwitchPreference(
                 checked = state.settings.appWhitelistEnabled,
                 onCheckedChange = { app.set(CapsuleSettings.APP_WHITELIST_ENABLED, it) },
@@ -1235,53 +1423,7 @@ private fun HomePage(
                 )
             }
         }
-        SettingsGroup(stringResource(R.string.section_all_in_one)) {
-            TuningDropdown(
-                title = stringResource(R.string.lyric_source_mode),
-                items = sourceOptions.map { it.second },
-                selectedIndex = selectedSourceIndex,
-                enabled = ready,
-                onSelectedIndexChange = { idx ->
-                    sourceOptions.getOrNull(idx)?.first?.let(app::setLyricSourceMode)
-                },
-            )
-            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
-            TactileSwitchPreference(
-                checked = state.settings.autoTranslateVi,
-                onCheckedChange = { app.set(CapsuleSettings.AUTO_TRANSLATE_VI, it) },
-                title = stringResource(R.string.auto_translate_vi),
-                summary = stringResource(R.string.auto_translate_vi_summary),
-                enabled = ready,
-            )
-            if (state.settings.autoTranslateVi) {
-                HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
-                TuningDropdown(
-                    title = stringResource(R.string.translate_target_lang),
-                    items = langOptions.map { it.second },
-                    selectedIndex = selectedLangIndex,
-                    enabled = ready,
-                    onSelectedIndexChange = { idx ->
-                        langOptions.getOrNull(idx)?.first?.let(app::setTranslateTargetLang)
-                    },
-                )
-            }
-            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
-            TactileSwitchPreference(
-                checked = state.settings.lockscreenBridge,
-                onCheckedChange = { app.set(CapsuleSettings.LOCKSCREEN_BRIDGE, it) },
-                title = stringResource(R.string.lockscreen_bridge),
-                summary = stringResource(R.string.lockscreen_bridge_summary),
-                enabled = ready,
-            )
-            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
-            TactileSwitchPreference(
-                checked = state.settings.aodUnlockWhitelist,
-                onCheckedChange = { app.set(CapsuleSettings.AOD_UNLOCK_WHITELIST, it) },
-                title = stringResource(R.string.aod_unlock_whitelist),
-                summary = stringResource(R.string.aod_unlock_whitelist_summary),
-                enabled = ready,
-            )
-            HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+        SettingsGroup(stringResource(R.string.section_lyrics_cache)) {
             TactileSwitchPreference(
                 checked = state.settings.autoClearCache,
                 onCheckedChange = { enabled ->
@@ -1301,12 +1443,28 @@ private fun HomePage(
                 title = stringResource(R.string.clear_lyric_cache),
                 summary = stringResource(R.string.lyric_cache_usage, formattedCacheSize, cacheStats.fileCount),
                 onClick = {
+                    haptic(CouiHapticEffect.Strength)
                     shop.terramoor.github.io.lyrics.OnlineLyricFetcher.clearCache(context)
                     cacheStats = shop.terramoor.github.io.lyrics.OnlineLyricFetcher.cacheStats(context)
                     Toast.makeText(context, R.string.clear_lyric_cache_done, Toast.LENGTH_SHORT).show()
                 },
             )
         }
+    }
+}
+
+@Composable
+private fun formatNowPlayingSource(rawSource: String): String = when (val s = rawSource.trim().lowercase()) {
+    "" -> stringResource(R.string.now_playing_source_none)
+    "player" -> stringResource(R.string.now_playing_source_player)
+    "apple-music" -> "Apple Music"
+    "better-lyrics", "binimum", "boidu" -> "Better Lyrics"
+    "lrclib" -> "LRCLIB"
+    "kugou", "kugou-krc" -> "KuGou"
+    "lyrics.ovh" -> "Lyrics.ovh"
+    else -> when {
+        s.startsWith("lyricsplus") -> "LyricsPlus"
+        else -> rawSource
     }
 }
 

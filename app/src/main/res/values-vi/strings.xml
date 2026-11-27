@@ -73,7 +73,18 @@
     <string name="preview_korean">Tiếng Hàn</string>
     <string name="tab_home">Trang chủ</string>
     <string name="tab_tuning">Chỉnh</string>
+    <string name="tab_lyrics">Lời nhạc</string>
     <string name="tab_about">Thông tin</string>
+    <string name="lyrics_page_title">Lời bài hát &amp; nguồn</string>
+    <string name="section_now_playing">Đang phát</string>
+    <string name="now_playing_idle">Đang chờ phát nhạc</string>
+    <string name="now_playing_source_player">Trình phát</string>
+    <string name="now_playing_source_none">Chưa có lời</string>
+    <string name="now_playing_word_timed">Từng chữ</string>
+    <string name="section_lockscreen_aod">Màn hình khóa &amp; AOD</string>
+    <string name="section_lyrics_source">Nguồn lời &amp; dịch thuật</string>
+    <string name="section_lyrics_players">Trình phát</string>
+    <string name="section_lyrics_cache">Bộ nhớ đệm</string>
     <string name="section_camera">Camera trước</string>
     <string name="section_capsule_elements">Thành phần viên nang</string>
     <string name="show_cover">Hiện ảnh bìa</string>
@@ -163,6 +174,8 @@
     <string name="troubleshoot_send_log">Không tìm thấy AstraFlow. Hãy xuất nhật ký chẩn đoán và gửi vào nhóm QQ %1$s để được hỗ trợ.</string>
     <string name="section_all_in_one">Nguồn lời tích hợp (All-in-One)</string>
     <string name="lyric_source_mode">Nhà cung cấp ưu tiên</string>
+    <string name="interpolate_word_lyrics">Nội suy lời từng chữ</string>
+    <string name="interpolate_word_lyrics_summary">Ước lượng nhịp từng chữ theo âm tiết và năng lượng giọng hát khi nguồn không có karaoke từng từ (tốn thêm chút CPU)</string>
     <string name="source_auto">Tự động (Ưu tiên từng từ)</string>
     <string name="source_external_only">Chỉ dùng nguồn từ trình phát</string>
     <string name="auto_translate_vi">Tự động dịch lời bài hát</string>

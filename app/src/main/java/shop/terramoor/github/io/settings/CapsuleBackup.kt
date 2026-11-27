@@ -34,6 +34,7 @@ internal object CapsuleBackup {
             .put(CapsuleSettings.NO_LYRICS, settings.noLyricsMode.name)
             .put(CapsuleSettings.PAUSE_BEHAVIOR, settings.pauseBehavior.name)
             .put(CapsuleSettings.LYRIC_SOURCE_MODE, settings.lyricSourceMode.name)
+            .put(CapsuleSettings.INTERPOLATE_WORD_LYRICS, settings.interpolateWordLyrics)
             .put(CapsuleSettings.AUTO_TRANSLATE_VI, settings.autoTranslateVi)
             .put(CapsuleSettings.TRANSLATE_TARGET_LANG, settings.translateTargetLang.name)
             .put(CapsuleSettings.LOCKSCREEN_BRIDGE, settings.lockscreenBridge)
@@ -100,6 +101,7 @@ internal object CapsuleBackup {
             else lyrics.pauseBehavior,
             lyricSourceMode = data.optString(CapsuleSettings.LYRIC_SOURCE_MODE, "")
                 .let { name -> LyricSourceMode.entries.firstOrNull { it.name == name } ?: lyrics.lyricSourceMode },
+            interpolateWordLyrics = if (data.has(CapsuleSettings.INTERPOLATE_WORD_LYRICS)) data.optBoolean(CapsuleSettings.INTERPOLATE_WORD_LYRICS, lyrics.interpolateWordLyrics) else lyrics.interpolateWordLyrics,
             autoTranslateVi = if (data.has(CapsuleSettings.AUTO_TRANSLATE_VI)) data.optBoolean(CapsuleSettings.AUTO_TRANSLATE_VI, lyrics.autoTranslateVi) else lyrics.autoTranslateVi,
             translateTargetLang = data.optString(CapsuleSettings.TRANSLATE_TARGET_LANG, "")
                 .let { name -> TranslateTargetLang.entries.firstOrNull { it.name == name } ?: lyrics.translateTargetLang },
@@ -149,6 +151,7 @@ internal fun SharedPreferences.Editor.writeSettings(settings: CapsuleSettings) {
     putString(CapsuleSettings.NO_LYRICS, settings.noLyricsMode.name)
     putString(CapsuleSettings.PAUSE_BEHAVIOR, settings.pauseBehavior.name)
     putString(CapsuleSettings.LYRIC_SOURCE_MODE, settings.lyricSourceMode.name)
+    putBoolean(CapsuleSettings.INTERPOLATE_WORD_LYRICS, settings.interpolateWordLyrics)
     putBoolean(CapsuleSettings.AUTO_TRANSLATE_VI, settings.autoTranslateVi)
     putString(CapsuleSettings.TRANSLATE_TARGET_LANG, settings.translateTargetLang.name)
     putBoolean(CapsuleSettings.LOCKSCREEN_BRIDGE, settings.lockscreenBridge)

@@ -50,14 +50,19 @@ internal class CapsuleRuntime(
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val onlineExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val statusExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val bridgedPayloadsByTitle = java.util.concurrent.ConcurrentHashMap<String, String>()
     @Volatile var fluidCloudHooked: Boolean = false
     @Volatile var lockscreenHooked: Boolean = false
     @Volatile var aodHooked: Boolean = false
     @Volatile private var hookStatusReported: Boolean = false
+    private val readingNativeMetadata = ThreadLocal<Boolean>()
+    private var lastReportedNowPlayingKey: String? = null
+    private var lastReportedCoverTrack: String? = null
     private var aodTitleView = WeakReference<android.widget.TextView>(null)
     private var aodArtistView = WeakReference<android.widget.TextView>(null)
     private val aodOverlay = AodLyricOverlay { onMain("AOD attached") { renderAodOnly() } }
+    private val vocalTracker = VocalEnergyTracker()
     private var preferences: SharedPreferences? = null
     private var preferenceAttempts = 0
     private var settingsUpdateRegistered = false
@@ -153,16 +158,21 @@ internal class CapsuleRuntime(
         if (settings == previous) return
         if (settings.introDots != previous.introDots) session?.lastLoggedLine = null
         if (!settings.enabled) {
+            vocalTracker.setActive(false)
             aodOverlay.restoreNative()
             stopObservation()
             setStatus("Lyrics disabled")
             return
         }
+        if (!settings.interpolateWordLyrics) {
+            vocalTracker.setActive(false)
+        }
         if (!previous.enabled) {
             startObservation()
             readMedia()
         }
-        val sourceChanged = settings.lyricSourceMode != previous.lyricSourceMode
+        val sourceChanged = settings.lyricSourceMode != previous.lyricSourceMode ||
+            settings.interpolateWordLyrics != previous.interpolateWordLyrics
         val translationChanged = settings.translateTargetLang != previous.translateTargetLang ||
             settings.autoTranslateVi != previous.autoTranslateVi
         if (sourceChanged || translationChanged) {
@@ -282,9 +292,56 @@ internal class CapsuleRuntime(
             putBoolean(LyricBridgeProvider.KEY_AOD, aodHooked)
         }
         hookStatusReported = true
-        onlineExecutor.execute {
+        statusExecutor.execute {
             runCatching {
                 ctx.contentResolver.call(uri, LyricBridgeProvider.METHOD_REPORT_HOOK_STATUS, null, args)
+            }
+        }
+    }
+
+    private fun reportNowPlayingNow(
+        title: String,
+        artist: String,
+        source: String,
+        wordTimed: Boolean,
+        artwork: Bitmap? = null,
+    ) {
+        val ctx = resolveAppContext() ?: return
+        val trackKey = "$title|$artist"
+        val needCover = artwork != null && !artwork.isRecycled && trackKey != lastReportedCoverTrack
+        val sig = "$trackKey|$source|$wordTimed"
+        if (sig == lastReportedNowPlayingKey && !needCover) return
+        lastReportedNowPlayingKey = sig
+        if (needCover) lastReportedCoverTrack = trackKey
+        if (title.isBlank()) lastReportedCoverTrack = null
+        val uri = android.net.Uri.parse("content://$modulePackage${LyricBridgeProvider.AUTHORITY_SUFFIX}")
+        val artworkCopy = if (needCover && artwork != null) {
+            runCatching {
+                val longest = maxOf(artwork.width, artwork.height).coerceAtLeast(1)
+                if (longest <= 128) artwork.copy(Bitmap.Config.ARGB_8888, false)
+                else Bitmap.createScaledBitmap(
+                    artwork,
+                    (artwork.width * 128f / longest).roundToInt().coerceAtLeast(1),
+                    (artwork.height * 128f / longest).roundToInt().coerceAtLeast(1),
+                    true,
+                )
+            }.getOrNull()
+        } else null
+        statusExecutor.execute {
+            runCatching {
+                val coverBytes = artworkCopy?.let { bmp ->
+                    val out = java.io.ByteArrayOutputStream()
+                    bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                    out.toByteArray()
+                }
+                val args = android.os.Bundle().apply {
+                    putString(LyricBridgeProvider.EXTRA_TITLE, title)
+                    putString(LyricBridgeProvider.EXTRA_ARTIST, artist)
+                    putString(LyricBridgeProvider.EXTRA_SOURCE, source)
+                    putBoolean(LyricBridgeProvider.EXTRA_WORD_TIMED, wordTimed)
+                    if (coverBytes != null) putByteArray(LyricBridgeProvider.EXTRA_COVER_BYTES, coverBytes)
+                }
+                ctx.contentResolver.call(uri, LyricBridgeProvider.METHOD_REPORT_NOW_PLAYING, null, args)
             }
         }
     }
@@ -375,10 +432,21 @@ internal class CapsuleRuntime(
     }
 
     fun bridgeLyricInfo(metadata: MediaMetadata): String? {
+        if (readingNativeMetadata.get() == true) return null
         if (!settings.enabled || !settings.lockscreenBridge) return null
         val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)?.trim()?.lowercase(java.util.Locale.ROOT)
             ?.takeIf { it.isNotEmpty() } ?: return null
         return bridgedPayloadsByTitle[title]
+    }
+
+    private fun readNativeLyricInfo(data: MediaMetadata?): String? {
+        if (data == null) return null
+        readingNativeMetadata.set(true)
+        return try {
+            data.getString(LyricPayload.KEY)?.takeIf { it.isNotBlank() }
+        } finally {
+            readingNativeMetadata.set(false)
+        }
     }
 
     private fun storeBridgedPayload(title: String?, payload: String) {
@@ -852,6 +920,7 @@ internal class CapsuleRuntime(
         }
         observer = null
         if (releaseMedia) {
+            vocalTracker.setActive(false)
             releaseSession()
             media = null
         }
@@ -1027,7 +1096,7 @@ internal class CapsuleRuntime(
                 val origWidth = target.capsule.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
                 originalCapsuleMetrics[target.capsule] = origWidth to target.capsule.minimumWidth
             }
-            labels = CapsuleLabels(target, originalCapsuleMetrics[target.capsule])
+            labels = CapsuleLabels(target, originalCapsuleMetrics[target.capsule], vocalTracker::pacedPosition)
             Log.i(TAG, "Verified native media capsule label slots")
             fun node(view: View) = "${view.javaClass.name}(${view.width}x${view.height},shown=${view.isShown})"
             diagnostics.note("Native capsule bound: capsule=${node(target.capsule)}, titleFrame=${node(target.title.frame)}, title=${node(target.title.stock)}")
@@ -1127,6 +1196,16 @@ internal class CapsuleRuntime(
         }
         val tintEnabled = settings.lyricTintEnabled
         val artwork = watch.artworkSource(candidate.artwork, binding.target.artwork)
+        val curTrack = watch.aodSongTitle()
+        if (artwork != null && !curTrack.isNullOrBlank()) {
+            reportNowPlayingNow(
+                title = curTrack,
+                artist = watch.aodSongArtist().orEmpty(),
+                source = if (watch.timeline != null) watch.currentLyricSource else "",
+                wordTimed = watch.timeline != null && watch.isTrueWordSync,
+                artwork = artwork,
+            )
+        }
         val background = if (settings.artwork) watch.background(artwork, settings[CapsuleTuning.BLUR]) else null
         val ink = watch.tint.resolve(watch.tintArtwork.bitmap, background, settings,
             settings[CapsuleTuning.ISLAND_WIDTH] / 30f)
@@ -1167,6 +1246,9 @@ internal class CapsuleRuntime(
             val mode = index.takeIf { it >= 0 }?.let(presentation::switchMode)
             diagnostics.note("[lyric schedule] index=$index/${presentation.lines.size}, positionMs=$position, range=${line?.startMs}..${line?.endMs}, scrollEnd=${frame?.endMs}, displayStart=${frame?.displayStartMs}, next=$next, mode=$mode, secondRow=${frame?.rows?.second != null}, translated=${!line?.translation.isNullOrBlank()}, shown=${binding.target.capsule.isShown}")
         }
+        val useVocalPacing = settings.enabled && settings.interpolateWordLyrics &&
+            !watch.isTrueWordSync && !watch.isPaused && shown && frame != null && frame.countdown == null
+        vocalTracker.setActive(useVocalPacing)
         if (frame != null) {
             val phase = when {
                 frame.isIntro -> "INTRO_DOTS"
@@ -1323,6 +1405,10 @@ internal class CapsuleRuntime(
         val hasPlaybackPosition: Boolean get() = playback.hasPosition
         var timeline: Timeline? = null
             private set
+        var isTrueWordSync: Boolean = false
+            private set
+        var currentLyricSource: String = ""
+            private set
         var duration = 0L
             private set
         private var metadata: MediaMetadata? = null
@@ -1391,7 +1477,40 @@ internal class CapsuleRuntime(
                 raw = null
                 timeline = null
                 lastLoggedLine = null
-                scheduleOnlineFallback(currentTrack, trackSequence, duration)
+                if (settings.lyricSourceMode == shop.terramoor.github.io.settings.LyricSourceMode.EXTERNAL_ONLY) {
+                    val nativePayload = readNativeLyricInfo(metadata ?: controller.metadata)
+                    val parsed = nativePayload?.let { LyricPayload.inspect(it, currentTrack.title, false, currentTrack.artist) }
+                    val nativeTimeline = parsed?.timeline
+                    if (nativeTimeline != null) {
+                        raw = nativePayload
+                        timeline = nativeTimeline
+                        reportNowPlayingNow(
+                            title = currentTrack.title.orEmpty(),
+                            artist = currentTrack.artist.orEmpty(),
+                            source = "player",
+                            wordTimed = nativeTimeline.lines.any { it.words.isNotEmpty() },
+                            artwork = aodArtwork(),
+                        )
+                        requestOnlineTranslation(nativeTimeline, trackSequence)
+                    } else {
+                        reportNowPlayingNow(
+                            title = currentTrack.title.orEmpty(),
+                            artist = currentTrack.artist.orEmpty(),
+                            source = "",
+                            wordTimed = false,
+                            artwork = aodArtwork(),
+                        )
+                    }
+                } else {
+                    reportNowPlayingNow(
+                        title = currentTrack.title.orEmpty(),
+                        artist = currentTrack.artist.orEmpty(),
+                        source = "",
+                        wordTimed = false,
+                        artwork = aodArtwork(),
+                    )
+                    scheduleOnlineFallback(currentTrack, trackSequence, duration)
+                }
                 render()
                 return
             }
@@ -1427,6 +1546,7 @@ internal class CapsuleRuntime(
                     putString(LyricBridgeProvider.EXTRA_ARTIST, targetTrack.artist)
                     putLong(LyricBridgeProvider.EXTRA_DURATION_MS, trackDurationMs)
                     putString(LyricBridgeProvider.EXTRA_SOURCE_MODE, sourceMode.name)
+                    putBoolean(LyricBridgeProvider.EXTRA_INTERPOLATE_WORDS, settings.interpolateWordLyrics)
                     putBoolean(LyricBridgeProvider.EXTRA_AUTO_CLEAR_CACHE, settings.autoClearCache)
                 }
                 onlineExecutor.execute {
@@ -1438,11 +1558,14 @@ internal class CapsuleRuntime(
                     }
                     val payload = reply?.getString(LyricBridgeProvider.EXTRA_PAYLOAD)?.takeIf { it.isNotBlank() } ?: return@execute
                     val source = reply.getString(LyricBridgeProvider.EXTRA_SOURCE).orEmpty()
+                    val isTrueWordSync = reply.getBoolean(LyricBridgeProvider.EXTRA_WORD_TIMED, false)
                     main.post {
                         if (session !== this || trackSequence != seq || timeline != null) return@post
                         val parsed = LyricPayload.inspect(payload, targetTrack.title, false, targetTrack.artist)
                         val fetchedTimeline = parsed.timeline ?: return@post
                         timeline = fetchedTimeline
+                        this.isTrueWordSync = isTrueWordSync
+                        currentLyricSource = source
                         raw = payload
                         storeBridgedPayload(targetTrack.title, payload)
                         runCatching { org.json.JSONObject(payload).optString("lyric") }
@@ -1451,9 +1574,16 @@ internal class CapsuleRuntime(
                             }
                         lastLoggedLine = null
                         val wordLines = fetchedTimeline.lines.count { it.words.isNotEmpty() }
-                        val msg = "[lyrics] ONLINE($source), lines=${fetchedTimeline.lines.size}, wordLines=$wordLines, translated=${fetchedTimeline.lines.count { !it.translation.isNullOrBlank() }}"
+                        val msg = "[lyrics] ONLINE($source), lines=${fetchedTimeline.lines.size}, wordLines=$wordLines, trueWord=$isTrueWordSync, translated=${fetchedTimeline.lines.count { !it.translation.isNullOrBlank() }}"
                         logLyrics(msg)
                         Log.i(TAG, msg)
+                        reportNowPlayingNow(
+                            title = targetTrack.title.orEmpty(),
+                            artist = targetTrack.artist.orEmpty(),
+                            source = source,
+                            wordTimed = isTrueWordSync,
+                            artwork = aodArtwork(),
+                        )
                         render()
                         requestOnlineTranslation(fetchedTimeline, seq)
                     }
@@ -1570,8 +1700,18 @@ internal class CapsuleRuntime(
 
         fun aodSongArtist(): String? = track?.artist?.trim()?.takeIf { it.isNotEmpty() }
 
-        fun aodArtwork(): Bitmap? =
-            (selectedArtwork ?: metadataArtwork ?: nativeArtwork ?: iconArtwork)?.takeUnless { it.isRecycled }
+        fun aodArtwork(): Bitmap? {
+            (selectedArtwork ?: metadataArtwork ?: nativeArtwork ?: iconArtwork)
+                ?.takeUnless { it.isRecycled }
+                ?.let { return it }
+            val data = metadata ?: return null
+            return sequenceOf(
+                MediaMetadata.METADATA_KEY_ALBUM_ART,
+                MediaMetadata.METADATA_KEY_ART,
+                MediaMetadata.METADATA_KEY_DISPLAY_ICON,
+            ).mapNotNull { data.getBitmap(it) }
+                .firstOrNull { !it.isRecycled && it !== previousArtwork }
+        }
 
         fun metadataChanged(data: MediaMetadata?): Boolean {
             if (data == null) {
@@ -1587,7 +1727,7 @@ internal class CapsuleRuntime(
                 return false
             }
             missingTrack = false
-            val nextPayload = data.getString(LyricPayload.KEY)?.takeIf { it.isNotBlank() }
+            val nextPayload = readNativeLyricInfo(data)
             val changed = track != nextTrack
             if (changed) {
                 tintArtworkSelection.onTrack(token to nextTrack)
@@ -1610,6 +1750,8 @@ internal class CapsuleRuntime(
                 }
                 raw = null
                 timeline = null
+                currentLyricSource = ""
+                isTrueWordSync = false
             }
             when {
                 nextPayload == null || nextPayload == previousTrackPayload -> {
@@ -1624,7 +1766,11 @@ internal class CapsuleRuntime(
                         val parsed = LyricPayload.inspect(nextPayload, nextTrack.title, trackChanged, nextTrack.artist)
                         timeline = parsed.timeline
                         val lines = timeline?.lines
-                        if (lines != null) lastTrackPayload = nextPayload
+                        if (lines != null) {
+                            lastTrackPayload = nextPayload
+                            currentLyricSource = "player"
+                            isTrueWordSync = lines.any { it.words.isNotEmpty() }
+                        }
                         val outcome = if (lines == null) {
                             "[lyrics] ${parsed.outcome}, chars=${nextPayload.length}, LRC=${parsed.hasLrc}, TTML=${parsed.hasTtml}"
                         } else {
@@ -1640,6 +1786,13 @@ internal class CapsuleRuntime(
             duration = data.getLong(MediaMetadata.METADATA_KEY_DURATION).takeIf { it > 0L }
                 ?: if (changed) 0L else duration
             val currentTimeline = timeline
+            reportNowPlayingNow(
+                title = nextTrack.title.orEmpty(),
+                artist = nextTrack.artist.orEmpty(),
+                source = if (currentTimeline != null) currentLyricSource else "",
+                wordTimed = currentTimeline != null && isTrueWordSync,
+                artwork = aodArtwork(),
+            )
             if (currentTimeline == null) {
                 scheduleOnlineFallback(nextTrack, trackSequence, duration)
             } else {

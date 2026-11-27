@@ -21,6 +21,7 @@ import kotlin.math.roundToInt
 internal class CapsuleLabels(
     val target: NativeContract.Target,
     initialMetrics: Pair<Int, Int>? = null,
+    private val vocalModulator: ((rawPosMs: Long, lineStartMs: Long, lineEndMs: Long, nowMs: Long) -> Long)? = null,
 ) {
     private val capsule = target.capsule
     private val density = capsule.resources.displayMetrics.density
@@ -353,7 +354,11 @@ internal class CapsuleLabels(
             val left = capsuleLyricsLeft(iconStart + target.artwork.width, density, settings) + inset
             val right = capsuleLyricsRight(width.toFloat(), waveformLeft, density, settings) - inset
             val timing = clock
-            val position = if (line.isTrackInfo) now else viewportPosition ?: timing?.position(now) ?: line.startMs
+            val rawPosition = if (line.isTrackInfo) now else viewportPosition ?: timing?.position(now) ?: line.startMs
+            val position = if (!line.isTrackInfo && viewportPosition == null && timing?.moving == true && vocalModulator != null) {
+                val lineEnd = line.endMs ?: (line.startMs + 6_000L)
+                vocalModulator.invoke(rawPosition, line.startMs, lineEnd, now)
+            } else rawPosition
             val settled = animatedWidth == null && bounceShrink == null && abs(width - capsule.measuredWidth) <= 1
             val redrawDelay = strip.draw(
                 canvas, left, area.top, right, area.bottom,

@@ -52,7 +52,14 @@ internal object OnlineLyricFetcher {
         readCache(context, cacheKey)?.let { cached ->
             val obj = try { JSONObject(cached) } catch (_: Exception) { null }
             if (obj != null && obj.has("payload")) {
-                return FetchedPayload(obj.optString("source", "cache"), obj.getString("payload"))
+                val src = obj.optString("source", "cache")
+                val trueWord = if (obj.has("trueWordSync")) {
+                    obj.optBoolean("trueWordSync", false)
+                } else {
+                    val low = src.lowercase(Locale.ROOT)
+                    low == "apple-music" || low == "better-lyrics" || low == "kugou-krc" || low.startsWith("lyricsplus")
+                }
+                return FetchedPayload(src, obj.getString("payload"), isTrueWordSync = trueWord)
             }
         }
 
@@ -74,6 +81,7 @@ internal object OnlineLyricFetcher {
         if (fetched != null) {
             val wrap = JSONObject()
                 .put("source", fetched.source)
+                .put("trueWordSync", fetched.isTrueWordSync)
                 .put("payload", fetched.payloadJson)
             writeCache(context, cacheKey, wrap.toString())
         }
@@ -244,9 +252,16 @@ internal object OnlineLyricFetcher {
 
     // 0. Apple Music word-by-word (LyricsPlus v2 primary -> Lossless TTML -> iTunes + Paxsenix fallback)
     private fun tryAppleMusic(rawTitle: String, cleanTitle: String, artist: String, durationMs: Long): FetchedPayload? {
-        tryLyricsPlus(rawTitle, cleanTitle, artist, durationMs)?.let { return it }
-        tryLossless(rawTitle, cleanTitle, artist, durationMs)?.let { return it }
-        return try {
+        var lineFallback: FetchedPayload? = null
+        tryLyricsPlus(rawTitle, cleanTitle, artist, durationMs)?.let { res ->
+            if (res.isTrueWordSync) return res
+            lineFallback = res
+        }
+        tryLossless(rawTitle, cleanTitle, artist, durationMs)?.let { res ->
+            if (res.isTrueWordSync) return res
+            if (lineFallback == null) lineFallback = res
+        }
+        val paxResult = try {
             val primaryArtist = primaryArtistName(artist)
             val term = if (primaryArtist.isNotBlank()) "$cleanTitle $primaryArtist" else cleanTitle
             val searchUrl = "https://itunes.apple.com/search?term=${enc(term)}&entity=song&limit=5"
@@ -277,29 +292,32 @@ internal object OnlineLyricFetcher {
                     if (ttml != null) {
                         val lrc = ttmlToEnhancedLrc(ttml)
                         if (lrc.isNotBlank()) {
+                            val hasWords = lrc.contains(ANGLE_TS_REGEX)
                             val payload = JSONObject()
                                 .put("songName", rawTitle)
                                 .put("artist", artist)
                                 .put("lyric", lrc)
                                 .put("ttml", ttml)
                                 .toString()
-                            Log.i(TAG, "Fetched TTML word-sync lyrics from Apple Music (id=$trackId)")
-                            return FetchedPayload("apple-music", payload)
+                            Log.i(TAG, "Fetched TTML word-sync lyrics from Apple Music (id=$trackId, word=$hasWords)")
+                            return FetchedPayload("apple-music", payload, isTrueWordSync = hasWords)
                         }
                     }
                     val contentArr = obj.optJSONArray("content")
                     if (contentArr != null && contentArr.length() > 0) {
                         val elrcFromContent = paxsenixContentToEnhancedLrc(contentArr)
                         if (elrcFromContent.isNotBlank()) {
-                            Log.i(TAG, "Fetched word-sync JSON lyrics from Apple Music (id=$trackId)")
-                            return FetchedPayload("apple-music", buildLrcPayload(rawTitle, artist, elrcFromContent, 0L))
+                            val hasWords = elrcFromContent.contains(ANGLE_TS_REGEX)
+                            Log.i(TAG, "Fetched word-sync JSON lyrics from Apple Music (id=$trackId, word=$hasWords)")
+                            return FetchedPayload("apple-music", buildLrcPayload(rawTitle, artist, elrcFromContent, 0L), isTrueWordSync = hasWords)
                         }
                     }
                     val elrc = obj.optString("elrc").takeIf { it.isNotBlank() }
                         ?: obj.optString("lrc").takeIf { it.isNotBlank() }
                     if (elrc != null) {
-                        Log.i(TAG, "Fetched LRC lyrics from Apple Music (id=$trackId)")
-                        return FetchedPayload("apple-music", buildLrcPayload(rawTitle, artist, elrc, 0L))
+                        val hasWords = elrc.contains(ANGLE_TS_REGEX)
+                        Log.i(TAG, "Fetched LRC lyrics from Apple Music (id=$trackId, word=$hasWords)")
+                        return FetchedPayload("apple-music", buildLrcPayload(rawTitle, artist, elrc, 0L), isTrueWordSync = hasWords)
                     }
                 }
             }
@@ -308,6 +326,7 @@ internal object OnlineLyricFetcher {
             Log.w(TAG, "Apple Music failed: ${e.message}")
             null
         }
+        return paxResult ?: lineFallback
     }
 
     // 0b. Lossless / binimum.org Apple Music TTML archive (fast, duration-matched, word-sync prioritized)
@@ -886,9 +905,27 @@ internal object OnlineLyricFetcher {
         .replace("&apos;", "'")
         .replace("&#39;", "'")
 
+    fun applyInterpolationMode(payloadJson: String, isTrueWordSync: Boolean, interpolateWords: Boolean): String {
+        if (isTrueWordSync) return payloadJson
+        return runCatching {
+            val obj = JSONObject(payloadJson)
+            val lrc = obj.optString("lyric")
+            if (lrc.isBlank()) return payloadJson
+            val plain = ANGLE_TS_REGEX.replace(lrc, "")
+            val updated = if (interpolateWords) {
+                synthesizeWordTimingLrc(plain, 0L, syllableWeighted = true)
+            } else {
+                synthesizeWordTimingLrc(plain, 0L, syllableWeighted = false)
+            }
+            if (updated == lrc) payloadJson else obj.put("lyric", updated).toString()
+        }.getOrDefault(payloadJson)
+    }
+
+    private val ANGLE_TS_REGEX = Regex("""<\d{1,4}:\d{2}(?:[.:]\d{1,3})?>""")
+
     private fun buildLrcPayload(title: String, artist: String, lrc: String, durationMs: Long): String {
-        val enhanced = if (lrc.contains(Regex("""<\d{1,4}:\d{2}(?:[.:]\d{1,3})?>"""))) lrc
-            else synthesizeWordTimingLrc(lrc, durationMs)
+        val enhanced = if (lrc.contains(ANGLE_TS_REGEX)) lrc
+            else synthesizeWordTimingLrc(lrc, durationMs, syllableWeighted = false)
         return JSONObject()
             .put("songName", title)
             .put("artist", artist)
@@ -896,8 +933,8 @@ internal object OnlineLyricFetcher {
             .toString()
     }
 
-    /** Estimates per-word timestamps for line-synced LRC so word-by-word highlight works on all sources. */
-    private fun synthesizeWordTimingLrc(lrc: String, durationMs: Long): String {
+    /** Estimates per-word timestamps: uniform by character length when [syllableWeighted] is false, or syllable/punctuation weighted when true. */
+    private fun synthesizeWordTimingLrc(lrc: String, durationMs: Long, syllableWeighted: Boolean): String {
         val lineTagRegex = Regex("""^((?:\[\d{1,4}:\d{2}(?:[.:]\d{1,3})?])+)(.*)$""")
         val singleTagRegex = Regex("""\[(\d{1,4}):(\d{2})(?:[.:](\d{1,3}))?]""")
         data class Entry(val startMs: Long, val text: String)
@@ -917,6 +954,29 @@ internal object OnlineLyricFetcher {
         if (entries.isEmpty()) return lrc
         entries.sortBy { it.startMs }
         val wordTokenRegex = Regex("""\S+\s*""")
+
+        // Estimate the track's own median singing pace (ms/syllable) for adaptive interpolation.
+        val medianMsPerSyl = if (syllableWeighted) {
+            val paceSamples = ArrayList<Double>()
+            for (i in entries.indices) {
+                val e = entries[i]
+                if (e.text.isEmpty()) continue
+                val nextStart = entries.getOrNull(i + 1)?.startMs ?: continue
+                val rawSpan = nextStart - e.startMs
+                if (rawSpan !in 400L..9_000L) continue
+                val toks = tokenizeLine(e.text, wordTokenRegex)
+                val syls = toks.sumOf(::tokenSyllables)
+                if (syls >= 3.0) paceSamples += rawSpan.toDouble() / syls
+            }
+            if (paceSamples.size >= 4) {
+                paceSamples.sort()
+                val mid = paceSamples.size / 2
+                val med = if (paceSamples.size % 2 == 1) paceSamples[mid]
+                else (paceSamples[mid - 1] + paceSamples[mid]) * 0.5
+                med.coerceIn(130.0, 520.0)
+            } else 280.0
+        } else 280.0
+
         val out = StringBuilder()
         for (i in entries.indices) {
             val e = entries[i]
@@ -931,14 +991,14 @@ internal object OnlineLyricFetcher {
                 durationMs > e.startMs -> (durationMs - e.startMs).coerceAtMost(fallbackDur)
                 else -> fallbackDur
             }
-            val maxReasonable = (e.text.length * 220L).coerceIn(2_500L, 8_500L)
-            val span = rawSpan.coerceAtMost(maxReasonable).coerceAtLeast(350L)
-
-            val tokens = wordTokenRegex.findAll(e.text).map { it.value }.toList().let { words ->
-                // For CJK lines without spaces, split into individual characters
-                if (words.size == 1 && e.text.length >= 3 && e.text.any { it.code > 0x2E80 }) {
-                    e.text.map { it.toString() }
-                } else words
+            val tokens = tokenizeLine(e.text, wordTokenRegex)
+            val span = if (syllableWeighted) {
+                val syls = tokens.sumOf(::tokenSyllables).coerceAtLeast(1.0)
+                val estSingSpan = (syls * medianMsPerSyl * 1.25).toLong()
+                minOf((rawSpan * 0.80).toLong(), estSingSpan).coerceAtLeast(350L)
+            } else {
+                val maxReasonable = (e.text.length * 220L).coerceIn(2_500L, 8_500L)
+                rawSpan.coerceAtMost(maxReasonable).coerceAtLeast(350L)
             }
             if (tokens.size <= 1) {
                 out.append(formatLrcTime(e.startMs))
@@ -946,17 +1006,79 @@ internal object OnlineLyricFetcher {
                     .append(formatAngleTime(e.startMs + span)).append('\n')
                 continue
             }
-            val totalWeight = tokens.sumOf { it.trim().length.coerceAtLeast(1) }.toDouble()
+            if (!syllableWeighted) {
+                val totalWeight = tokens.sumOf { it.trim().length.coerceAtLeast(1) }.toDouble()
+                var acc = 0.0
+                out.append(formatLrcTime(e.startMs))
+                for (tok in tokens) {
+                    val wStart = e.startMs + (span * (acc / totalWeight)).toLong()
+                    out.append(formatAngleTime(wStart)).append(tok)
+                    acc += tok.trim().length.coerceAtLeast(1)
+                }
+                out.append(formatAngleTime(e.startMs + span)).append('\n')
+                continue
+            }
+            val speechWeights = DoubleArray(tokens.size) { idx ->
+                val charW = tokens[idx].trim().length.coerceAtLeast(1).toDouble()
+                val sylW = tokenSyllables(tokens[idx])
+                sylW * 0.75 + (charW * 0.35) * 0.25
+            }
+            val pauseWeights = DoubleArray(tokens.size) { idx ->
+                if (idx == tokens.lastIndex) 0.0 else trailingPauseWeight(tokens[idx])
+            }
+            var totalWeight = 0.0
+            for (idx in tokens.indices) totalWeight += speechWeights[idx] + pauseWeights[idx]
+            if (totalWeight <= 0.0) totalWeight = tokens.size.toDouble()
+
             var acc = 0.0
             out.append(formatLrcTime(e.startMs))
-            for (tok in tokens) {
+            for (idx in tokens.indices) {
                 val wStart = e.startMs + (span * (acc / totalWeight)).toLong()
-                out.append(formatAngleTime(wStart)).append(tok)
-                acc += tok.trim().length.coerceAtLeast(1)
+                out.append(formatAngleTime(wStart)).append(tokens[idx])
+                acc += speechWeights[idx]
+                if (pauseWeights[idx] > 0.0) {
+                    val wEnd = e.startMs + (span * (acc / totalWeight)).toLong()
+                    if (wEnd > wStart + 40L) out.append(formatAngleTime(wEnd))
+                    acc += pauseWeights[idx]
+                }
             }
             out.append(formatAngleTime(e.startMs + span)).append('\n')
         }
         return out.toString()
+    }
+
+    private fun tokenizeLine(text: String, wordTokenRegex: Regex): List<String> {
+        val words = wordTokenRegex.findAll(text).map { it.value }.toList()
+        return if (words.size == 1 && text.length >= 3 && text.any { it.code > 0x2E80 }) {
+            text.map { it.toString() }
+        } else words
+    }
+
+    private fun tokenSyllables(token: String): Double {
+        val core = token.trim().trimEnd(',', '.', '!', '?', ';', ':', '、', '，', '。', '！', '？', '—', '…', '"', '\'', ')')
+        if (core.isEmpty()) return 0.4
+        if (core.any { it.code > 0x2E80 }) {
+            return core.length.toDouble().coerceAtLeast(1.0)
+        }
+        val lower = core.lowercase(Locale.ROOT)
+        var vowelGroups = 0
+        var prevVowel = false
+        for (ch in lower) {
+            val isVowel = ch in "aeiouyăâêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ"
+            if (isVowel && !prevVowel) vowelGroups++
+            prevVowel = isVowel
+        }
+        return vowelGroups.coerceAtLeast(1).toDouble()
+    }
+
+    private fun trailingPauseWeight(token: String): Double {
+        val t = token.trim()
+        if (t.isEmpty()) return 0.0
+        return when (t.last()) {
+            ',', '、', '，', ';' -> 0.15
+            '.', '!', '?', '。', '！', '？', '—', '…' -> 0.27
+            else -> 0.0
+        }
     }
 
     private fun primaryArtistName(artist: String): String {

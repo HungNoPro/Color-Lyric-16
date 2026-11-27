@@ -99,6 +99,7 @@ internal data class CapsuleSettings(
     val noLyricsMode: NoLyricsMode = DEFAULT_NO_LYRICS_MODE,
     val pauseBehavior: PauseBehavior = PauseBehavior.KEEP_CURRENT,
     val lyricSourceMode: LyricSourceMode = LyricSourceMode.AUTO,
+    val interpolateWordLyrics: Boolean = false,
     val autoTranslateVi: Boolean = true,
     val translateTargetLang: TranslateTargetLang = TranslateTargetLang.SYSTEM,
     val lockscreenBridge: Boolean = true,
@@ -160,6 +161,7 @@ internal data class CapsuleSettings(
         const val NO_LYRICS = "no_lyrics_mode"
         const val PAUSE_BEHAVIOR = "pause_behavior"
         const val LYRIC_SOURCE_MODE = "lyric_source_mode"
+        const val INTERPOLATE_WORD_LYRICS = "interpolate_word_lyrics"
         const val AUTO_TRANSLATE_VI = "auto_translate_vi"
         const val TRANSLATE_TARGET_LANG = "translate_target_lang"
         const val LOCKSCREEN_BRIDGE = "lockscreen_bridge"
@@ -202,6 +204,7 @@ internal data class CapsuleSettings(
                 noLyricsMode = prefs.enumValue(NO_LYRICS, defaults.noLyricsMode),
                 pauseBehavior = prefs.enumValue(PAUSE_BEHAVIOR, defaults.pauseBehavior),
                 lyricSourceMode = prefs.enumValue(LYRIC_SOURCE_MODE, defaults.lyricSourceMode),
+                interpolateWordLyrics = prefs.getBoolean(INTERPOLATE_WORD_LYRICS, defaults.interpolateWordLyrics),
                 autoTranslateVi = prefs.getBoolean(AUTO_TRANSLATE_VI, defaults.autoTranslateVi),
                 translateTargetLang = prefs.enumValue(TRANSLATE_TARGET_LANG, defaults.translateTargetLang),
                 lockscreenBridge = prefs.getBoolean(LOCKSCREEN_BRIDGE, defaults.lockscreenBridge),
