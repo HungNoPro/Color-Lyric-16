@@ -608,6 +608,7 @@ private fun SettingsPage(
     val background = CouiPageDefaults.themeColors().background
     val dialogBackdrop = rememberCouiBackdrop()
     var showWhitelistDialog by remember { mutableStateOf(false) }
+    var fullLyricsTarget by remember { mutableStateOf<shop.terramoor.github.io.lyrics.LyricBridgeProvider.Companion.NowPlaying?>(null) }
     Box(Modifier.fillMaxSize()) {
         FloatingScaffold(
             modifier = Modifier.couiBackdrop(dialogBackdrop),
@@ -661,6 +662,7 @@ private fun SettingsPage(
                             SettingsTab.LYRICS -> LyricsPage(
                                 Modifier.fillMaxSize(), bottomClearance, state, app,
                                 onOpenWhitelist = { showWhitelistDialog = true },
+                                onOpenFullLyrics = { np -> fullLyricsTarget = np },
                             )
                             SettingsTab.ABOUT -> AboutPage(
                                 Modifier.fillMaxSize(), bottomClearance, version, canUseBackup, onExport, onImport,
@@ -682,6 +684,13 @@ private fun SettingsPage(
                 app.setAppWhitelist(selected)
             },
         )
+        fullLyricsTarget?.let { target ->
+            FullLyricsDialog(
+                nowPlaying = target,
+                backdrop = dialogBackdrop,
+                onDismiss = { fullLyricsTarget = null },
+            )
+        }
         if (updatePopupRelease != null && !showProviderPrompt && !showRestartConfirmation && !showLockScreenPrompt) {
             UpdateAvailableDialog(
                 release = updatePopupRelease,
@@ -1217,6 +1226,7 @@ private fun LyricsPage(
     state: TerraMoorApp.State,
     app: TerraMoorApp,
     onOpenWhitelist: () -> Unit,
+    onOpenFullLyrics: (shop.terramoor.github.io.lyrics.LyricBridgeProvider.Companion.NowPlaying) -> Unit,
 ) {
     val context = LocalContext.current
     val ready = state.connection == Connection.READY
@@ -1263,14 +1273,49 @@ private fun LyricsPage(
     val dark = isSystemInDarkTheme()
     val accent = CouiTheme.colorSchemeFor(dark).accent
     val sourceTagLabel = formatNowPlayingSource(nowPlaying.source)
+    var trackOffsetMs by remember(nowPlaying.title, nowPlaying.artist) {
+        mutableStateOf(
+            shop.terramoor.github.io.lyrics.LyricBridgeProvider.readTrackOffset(
+                context,
+                nowPlaying.title,
+                nowPlaying.artist,
+            ),
+        )
+    }
+
+    fun updateTrackOffset(nextMs: Long) {
+        if (nowPlaying.title.isBlank()) return
+        val saved = shop.terramoor.github.io.lyrics.LyricBridgeProvider.saveTrackOffset(
+            context,
+            nowPlaying.title,
+            nowPlaying.artist,
+            nextMs,
+        )
+        trackOffsetMs = saved
+        haptic(CouiHapticEffect.Strength)
+        CapsuleSettingsUpdate.publishLiveCommand(
+            context,
+            CapsuleSettingsUpdate.CMD_SET_OFFSET,
+            offsetMs = saved,
+        )
+    }
 
     SettingsList(modifier, bottomClearance) {
         SettingsPageTitle(R.string.lyrics_page_title)
         SettingsGroup(stringResource(R.string.section_now_playing)) {
             val hasTrack = nowPlaying.title.isNotBlank()
+            val hasLyrics = hasTrack && nowPlaying.source.isNotBlank()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .then(
+                        if (hasLyrics) {
+                            Modifier.clickable {
+                                haptic(CouiHapticEffect.Strength)
+                                onOpenFullLyrics(nowPlaying)
+                            }
+                        } else Modifier,
+                    )
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -1347,7 +1392,86 @@ private fun LyricsPage(
                                     ),
                                 )
                             }
+                            if (hasLyrics) {
+                                Text(
+                                    text = stringResource(R.string.now_playing_view_full),
+                                    color = accent,
+                                    style = COUITheme.textStyles.body2.copy(fontSize = 12.sp),
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(start = 2.dp),
+                                )
+                            }
                         }
+                    }
+                }
+                if (hasTrack) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(COUITheme.colorScheme.surfaceContainer)
+                            .clickable(enabled = ready) {
+                                haptic(CouiHapticEffect.Strength)
+                                CapsuleSettingsUpdate.publishLiveCommand(
+                                    context,
+                                    CapsuleSettingsUpdate.CMD_REFRESH_LYRICS,
+                                )
+                                Toast.makeText(context, R.string.now_playing_refreshing_toast, Toast.LENGTH_SHORT).show()
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_restart_rounded),
+                            contentDescription = stringResource(R.string.now_playing_refresh_lyrics),
+                            modifier = Modifier.size(18.dp),
+                            tint = if (ready) COUITheme.colorScheme.onSurface else COUITheme.colorScheme.onSurfaceSecondary,
+                        )
+                    }
+                }
+            }
+            if (hasLyrics) {
+                HorizontalDivider(Modifier.padding(horizontal = DividerDefaults.CardInset))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = stringResource(R.string.now_playing_offset_label),
+                        color = COUITheme.colorScheme.onSurface,
+                        style = COUITheme.textStyles.body2,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        val step = shop.terramoor.github.io.lyrics.LyricBridgeProvider.OFFSET_STEP_MS
+                        val canMinus = trackOffsetMs > shop.terramoor.github.io.lyrics.LyricBridgeProvider.MIN_OFFSET_MS
+                        val canPlus = trackOffsetMs < shop.terramoor.github.io.lyrics.LyricBridgeProvider.MAX_OFFSET_MS
+                        OffsetPillButton(
+                            text = "-0.2s",
+                            enabled = ready && canMinus,
+                            highlighted = false,
+                            accent = accent,
+                            onClick = { updateTrackOffset(trackOffsetMs - step) },
+                        )
+                        OffsetPillButton(
+                            text = formatOffsetSeconds(trackOffsetMs),
+                            enabled = ready && trackOffsetMs != 0L,
+                            highlighted = trackOffsetMs != 0L,
+                            accent = accent,
+                            onClick = { updateTrackOffset(0L) },
+                        )
+                        OffsetPillButton(
+                            text = "+0.2s",
+                            enabled = ready && canPlus,
+                            highlighted = false,
+                            accent = accent,
+                            onClick = { updateTrackOffset(trackOffsetMs + step) },
+                        )
                     }
                 }
             }
@@ -1449,6 +1573,183 @@ private fun LyricsPage(
                     Toast.makeText(context, R.string.clear_lyric_cache_done, Toast.LENGTH_SHORT).show()
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun OffsetPillButton(
+    text: String,
+    enabled: Boolean,
+    highlighted: Boolean,
+    accent: Color,
+    onClick: () -> Unit,
+) {
+    val bg = when {
+        highlighted -> accent.copy(alpha = 0.16f)
+        else -> COUITheme.colorScheme.surfaceContainer
+    }
+    val fg = when {
+        highlighted -> accent
+        enabled -> COUITheme.colorScheme.onSurface
+        else -> COUITheme.colorScheme.onSurfaceSecondary.copy(alpha = 0.5f)
+    }
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 9.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            color = fg,
+            style = COUITheme.textStyles.body2.copy(fontSize = 12.sp),
+            fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Medium,
+        )
+    }
+}
+
+private fun formatOffsetSeconds(offsetMs: Long): String {
+    if (offsetMs == 0L) return "0.0s"
+    val sign = if (offsetMs > 0L) "+" else "-"
+    val tenths = kotlin.math.abs(offsetMs) / 100L
+    return "$sign${tenths / 10}.${tenths % 10}s"
+}
+
+private fun formatLyricTimestamp(ms: Long): String {
+    val safe = ms.coerceAtLeast(0L)
+    val totalSec = safe / 1000L
+    val min = totalSec / 60L
+    val sec = totalSec % 60L
+    return String.format(java.util.Locale.US, "%02d:%02d", min, sec)
+}
+
+@Composable
+private fun FullLyricsDialog(
+    nowPlaying: shop.terramoor.github.io.lyrics.LyricBridgeProvider.Companion.NowPlaying,
+    backdrop: CouiBackdrop,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val dark = isSystemInDarkTheme()
+    val accent = CouiTheme.colorSchemeFor(dark).accent
+    val haptic = rememberCouiHaptic()
+    val lines = remember(nowPlaying.title, nowPlaying.artist, nowPlaying.source, nowPlaying.updatedAt) {
+        shop.terramoor.github.io.lyrics.LyricBridgeProvider.readNowPlayingLyrics(context)
+    }
+    val sourceLabel = formatNowPlayingSource(nowPlaying.source)
+    CouiDialog(
+        onDismissRequest = onDismiss,
+        dark = dark,
+        placement = CouiDialogPlacement.Bottom,
+        title = nowPlaying.title,
+        material = CouiDialogDefaults.material(dark),
+        backdrop = backdrop,
+        confirmAction = CouiDialogAction(
+            text = stringResource(R.string.full_lyrics_close),
+            onClick = {
+                haptic(CouiHapticEffect.Strength)
+                onDismiss()
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp),
+        ) {
+            Row(
+                modifier = Modifier.padding(bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (nowPlaying.artist.isNotBlank()) {
+                    Text(
+                        text = nowPlaying.artist,
+                        color = COUITheme.colorScheme.onSurfaceSecondary,
+                        style = COUITheme.textStyles.body2,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+                TagView(
+                    text = sourceLabel,
+                    insideMargin = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                    colors = TagViewDefaults.tagViewColors(
+                        containerColor = accent.copy(alpha = 0.14f),
+                        contentColor = accent,
+                    ),
+                )
+            }
+            if (lines.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 32.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = stringResource(R.string.full_lyrics_empty),
+                        color = COUITheme.colorScheme.onSurfaceSecondary,
+                        style = COUITheme.textStyles.body2,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 180.dp, max = 400.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                ) {
+                    itemsIndexed(lines, key = { idx, line -> "${line.startMs}_$idx" }) { _, line ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable {
+                                    haptic(CouiHapticEffect.Strength)
+                                    CapsuleSettingsUpdate.publishLiveCommand(
+                                        context,
+                                        CapsuleSettingsUpdate.CMD_SEEK_TO,
+                                        offsetMs = line.startMs,
+                                    )
+                                }
+                                .padding(horizontal = 8.dp, vertical = 7.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Text(
+                                text = formatLyricTimestamp(line.startMs),
+                                color = COUITheme.colorScheme.onSurfaceSecondary.copy(alpha = 0.7f),
+                                style = COUITheme.textStyles.body2.copy(fontSize = 12.sp),
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(
+                                    text = line.text,
+                                    color = COUITheme.colorScheme.onSurface,
+                                    style = COUITheme.textStyles.body1,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                if (!line.translation.isNullOrBlank()) {
+                                    Text(
+                                        text = line.translation,
+                                        color = COUITheme.colorScheme.onSurfaceSecondary,
+                                        style = COUITheme.textStyles.body2,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

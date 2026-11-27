@@ -42,6 +42,7 @@ internal object OnlineLyricFetcher {
     fun fetchLyrics(
         context: Context, title: String, artist: String?, durationMs: Long,
         sourceMode: String = "AUTO",
+        forceRefresh: Boolean = false,
     ): FetchedPayload? {
         if (sourceMode == "EXTERNAL_ONLY") return null
         val rawTitle = title.trim()
@@ -49,17 +50,19 @@ internal object OnlineLyricFetcher {
         if (cleanTitle.isEmpty()) return null
         val rawArtist = artist?.trim().orEmpty()
         val cacheKey = sha256("lyrics_v5|$sourceMode|$cleanTitle|$rawArtist|${durationMs / 1000}")
-        readCache(context, cacheKey)?.let { cached ->
-            val obj = try { JSONObject(cached) } catch (_: Exception) { null }
-            if (obj != null && obj.has("payload")) {
-                val src = obj.optString("source", "cache")
-                val trueWord = if (obj.has("trueWordSync")) {
-                    obj.optBoolean("trueWordSync", false)
-                } else {
-                    val low = src.lowercase(Locale.ROOT)
-                    low == "apple-music" || low == "better-lyrics" || low == "kugou-krc" || low.startsWith("lyricsplus")
+        if (!forceRefresh) {
+            readCache(context, cacheKey)?.let { cached ->
+                val obj = try { JSONObject(cached) } catch (_: Exception) { null }
+                if (obj != null && obj.has("payload")) {
+                    val src = obj.optString("source", "cache")
+                    val trueWord = if (obj.has("trueWordSync")) {
+                        obj.optBoolean("trueWordSync", false)
+                    } else {
+                        val low = src.lowercase(Locale.ROOT)
+                        low == "apple-music" || low == "better-lyrics" || low == "kugou-krc" || low.startsWith("lyricsplus")
+                    }
+                    return FetchedPayload(src, obj.getString("payload"), isTrueWordSync = trueWord)
                 }
-                return FetchedPayload(src, obj.getString("payload"), isTrueWordSync = trueWord)
             }
         }
 
@@ -905,19 +908,24 @@ internal object OnlineLyricFetcher {
         .replace("&apos;", "'")
         .replace("&#39;", "'")
 
-    fun applyInterpolationMode(payloadJson: String, isTrueWordSync: Boolean, interpolateWords: Boolean): String {
+    fun applyInterpolationMode(
+        payloadJson: String,
+        isTrueWordSync: Boolean,
+        interpolateWords: Boolean,
+        durationMs: Long = 0L,
+    ): String {
         if (isTrueWordSync) return payloadJson
         return runCatching {
             val obj = JSONObject(payloadJson)
-            val lrc = obj.optString("lyric")
+            val lrc = obj.optString("lyric").ifBlank { obj.optString("rawLyric") }
             if (lrc.isBlank()) return payloadJson
             val plain = ANGLE_TS_REGEX.replace(lrc, "")
             val updated = if (interpolateWords) {
-                synthesizeWordTimingLrc(plain, 0L, syllableWeighted = true)
+                synthesizeWordTimingLrc(plain, durationMs, syllableWeighted = true)
             } else {
-                synthesizeWordTimingLrc(plain, 0L, syllableWeighted = false)
+                synthesizeWordTimingLrc(plain, durationMs, syllableWeighted = false)
             }
-            if (updated == lrc) payloadJson else obj.put("lyric", updated).toString()
+            if (updated == obj.optString("lyric")) payloadJson else obj.put("lyric", updated).toString()
         }.getOrDefault(payloadJson)
     }
 

@@ -59,6 +59,7 @@ internal class CapsuleRuntime(
     private val readingNativeMetadata = ThreadLocal<Boolean>()
     private var lastReportedNowPlayingKey: String? = null
     private var lastReportedCoverTrack: String? = null
+    private var lastReportedLyricsHash: Int = 0
     private var aodTitleView = WeakReference<android.widget.TextView>(null)
     private var aodArtistView = WeakReference<android.widget.TextView>(null)
     private val aodOverlay = AodLyricOverlay { onMain("AOD attached") { renderAodOnly() } }
@@ -299,21 +300,44 @@ internal class CapsuleRuntime(
         }
     }
 
+    private fun serializeTimelineForUi(timeline: Timeline): String {
+        val arr = org.json.JSONArray()
+        for (line in timeline.lines) {
+            if (line.isInstrumentalGap) continue
+            val text = line.text.trim()
+            if (text.isEmpty()) continue
+            val obj = org.json.JSONObject()
+                .put("t", line.startMs)
+                .put("l", text)
+            val tr = line.translation?.trim()?.takeIf { it.isNotEmpty() }
+            if (tr != null) obj.put("tr", tr)
+            arr.put(obj)
+        }
+        return arr.toString()
+    }
+
     private fun reportNowPlayingNow(
         title: String,
         artist: String,
         source: String,
         wordTimed: Boolean,
         artwork: Bitmap? = null,
+        timeline: Timeline? = null,
     ) {
         val ctx = resolveAppContext() ?: return
         val trackKey = "$title|$artist"
         val needCover = artwork != null && !artwork.isRecycled && trackKey != lastReportedCoverTrack
+        val lyricsHash = if (timeline != null && source.isNotBlank()) System.identityHashCode(timeline) else 0
+        val needLyrics = lyricsHash != 0 && lyricsHash != lastReportedLyricsHash
         val sig = "$trackKey|$source|$wordTimed"
-        if (sig == lastReportedNowPlayingKey && !needCover) return
+        if (sig == lastReportedNowPlayingKey && !needCover && !needLyrics) return
         lastReportedNowPlayingKey = sig
         if (needCover) lastReportedCoverTrack = trackKey
-        if (title.isBlank()) lastReportedCoverTrack = null
+        if (needLyrics) lastReportedLyricsHash = lyricsHash
+        if (title.isBlank() || source.isBlank()) {
+            if (title.isBlank()) lastReportedCoverTrack = null
+            lastReportedLyricsHash = 0
+        }
         val uri = android.net.Uri.parse("content://$modulePackage${LyricBridgeProvider.AUTHORITY_SUFFIX}")
         val artworkCopy = if (needCover && artwork != null) {
             runCatching {
@@ -327,6 +351,12 @@ internal class CapsuleRuntime(
                 )
             }.getOrNull()
         } else null
+        val lyricsJson = when {
+            needLyrics && timeline != null -> serializeTimelineForUi(timeline)
+            source.isBlank() || title.isBlank() -> ""
+            else -> null
+        }
+        val watchRef = session
         statusExecutor.execute {
             runCatching {
                 val coverBytes = artworkCopy?.let { bmp ->
@@ -340,8 +370,15 @@ internal class CapsuleRuntime(
                     putString(LyricBridgeProvider.EXTRA_SOURCE, source)
                     putBoolean(LyricBridgeProvider.EXTRA_WORD_TIMED, wordTimed)
                     if (coverBytes != null) putByteArray(LyricBridgeProvider.EXTRA_COVER_BYTES, coverBytes)
+                    if (lyricsJson != null) putString(LyricBridgeProvider.EXTRA_LYRICS_LINES_JSON, lyricsJson)
                 }
-                ctx.contentResolver.call(uri, LyricBridgeProvider.METHOD_REPORT_NOW_PLAYING, null, args)
+                val reply = ctx.contentResolver.call(uri, LyricBridgeProvider.METHOD_REPORT_NOW_PLAYING, null, args)
+                val savedOffset = reply?.getLong(LyricBridgeProvider.EXTRA_OFFSET_MS, 0L) ?: 0L
+                if (watchRef != null) {
+                    main.post {
+                        if (session === watchRef) watchRef.initTrackOffsetIfNeeded(title, artist, savedOffset)
+                    }
+                }
             }
         }
     }
@@ -866,12 +903,30 @@ internal class CapsuleRuntime(
         val appCtx = hostView?.context?.applicationContext ?: resolveAppContext() ?: return
         if (!settingsUpdateRegistered) {
             try {
-                CapsuleSettingsUpdate.register(appCtx, modulePackage, main) { next ->
-                    receivedCommittedSettings = true
-                    main.removeCallbacks(applyPreferences)
-                    trace("preferences", "COMMIT_RECEIVED")
-                    protect("Committed capsule settings") { applySettings(next) }
-                }
+                CapsuleSettingsUpdate.register(
+                    appCtx,
+                    modulePackage,
+                    main,
+                    apply = { next ->
+                        receivedCommittedSettings = true
+                        main.removeCallbacks(applyPreferences)
+                        trace("preferences", "COMMIT_RECEIVED")
+                        protect("Committed capsule settings") { applySettings(next) }
+                    },
+                    onLiveCommand = { cmd, offsetMs ->
+                        protect("Live capsule command") {
+                            when (cmd) {
+                                CapsuleSettingsUpdate.CMD_SET_OFFSET -> session?.applyLyricOffset(offsetMs)
+                                CapsuleSettingsUpdate.CMD_SEEK_TO -> session?.seekToLyric(offsetMs)
+                                CapsuleSettingsUpdate.CMD_REFRESH_LYRICS -> session?.reloadOnlineLyricsAndTranslation(
+                                    sourceChanged = true,
+                                    translationChanged = false,
+                                    forceRefresh = true,
+                                )
+                            }
+                        }
+                    },
+                )
                 settingsUpdateRegistered = true
             } catch (failure: Exception) {
                 report("Register committed capsule settings", failure)
@@ -1204,6 +1259,7 @@ internal class CapsuleRuntime(
                 source = if (watch.timeline != null) watch.currentLyricSource else "",
                 wordTimed = watch.timeline != null && watch.isTrueWordSync,
                 artwork = artwork,
+                timeline = watch.timeline,
             )
         }
         val background = if (settings.artwork) watch.background(artwork, settings[CapsuleTuning.BLUR]) else null
@@ -1409,6 +1465,9 @@ internal class CapsuleRuntime(
             private set
         var currentLyricSource: String = ""
             private set
+        var lyricOffsetMs: Long = 0L
+            private set
+        private var offsetInitializedForTrack: Boolean = false
         var duration = 0L
             private set
         private var metadata: MediaMetadata? = null
@@ -1468,7 +1527,71 @@ internal class CapsuleRuntime(
             pendingOnlineFetch = null
         }
 
-        fun reloadOnlineLyricsAndTranslation(sourceChanged: Boolean, translationChanged: Boolean) {
+        private fun resolveNativePayload(): String? =
+            readNativeLyricInfo(metadata)?.takeUnless { it == previousTrackPayload }
+                ?: readNativeLyricInfo(controller.metadata)?.takeUnless { it == previousTrackPayload }
+                ?: lastTrackPayload?.takeUnless { it == previousTrackPayload }
+
+        private fun parsePlayerPayload(
+            nativePayload: String,
+            targetTrack: Track,
+            isTrackChanged: Boolean,
+            trackDurationMs: Long,
+        ): Pair<LyricPayload.Result, Pair<String, Boolean>> {
+            val initial = LyricPayload.inspect(nativePayload, targetTrack.title, isTrackChanged, targetTrack.artist)
+            val initialTimeline = initial.timeline ?: return initial to (nativePayload to false)
+            val hasTrueWords = initialTimeline.lines.any { it.words.isNotEmpty() }
+            if (hasTrueWords) {
+                return initial to (nativePayload to true)
+            }
+            val adjusted = shop.terramoor.github.io.lyrics.OnlineLyricFetcher.applyInterpolationMode(
+                nativePayload,
+                isTrueWordSync = false,
+                interpolateWords = settings.interpolateWordLyrics,
+                durationMs = trackDurationMs,
+            )
+            if (adjusted == nativePayload) {
+                return initial to (nativePayload to false)
+            }
+            val reparsed = LyricPayload.inspect(adjusted, targetTrack.title, isTrackChanged, targetTrack.artist)
+            return if (reparsed.timeline != null) {
+                reparsed to (adjusted to false)
+            } else {
+                initial to (nativePayload to false)
+            }
+        }
+
+        fun applyLyricOffset(offsetMs: Long) {
+            val clamped = offsetMs.coerceIn(LyricBridgeProvider.MIN_OFFSET_MS, LyricBridgeProvider.MAX_OFFSET_MS)
+            offsetInitializedForTrack = true
+            if (lyricOffsetMs == clamped) return
+            lyricOffsetMs = clamped
+            lastLoggedLine = null
+            render()
+        }
+
+        fun seekToLyric(lineStartMs: Long) {
+            val targetMs = (lineStartMs - lyricOffsetMs).coerceAtLeast(0L)
+            runCatching { controller.transportControls.seekTo(targetMs) }
+        }
+
+        fun initTrackOffsetIfNeeded(title: String, artist: String, savedOffsetMs: Long) {
+            if (offsetInitializedForTrack) return
+            if (track?.title.orEmpty() != title || track?.artist.orEmpty() != artist) return
+            offsetInitializedForTrack = true
+            val clamped = savedOffsetMs.coerceIn(LyricBridgeProvider.MIN_OFFSET_MS, LyricBridgeProvider.MAX_OFFSET_MS)
+            if (lyricOffsetMs != clamped) {
+                lyricOffsetMs = clamped
+                lastLoggedLine = null
+                render()
+            }
+        }
+
+        fun reloadOnlineLyricsAndTranslation(
+            sourceChanged: Boolean,
+            translationChanged: Boolean,
+            forceRefresh: Boolean = false,
+        ) {
             val currentTrack = track ?: return
             if (sourceChanged) {
                 cancelOnlineFetch()
@@ -1476,23 +1599,35 @@ internal class CapsuleRuntime(
                 onlineTranslateSeq = -1L
                 raw = null
                 timeline = null
+                currentLyricSource = ""
+                isTrueWordSync = false
                 lastLoggedLine = null
-                if (settings.lyricSourceMode == shop.terramoor.github.io.settings.LyricSourceMode.EXTERNAL_ONLY) {
-                    val nativePayload = readNativeLyricInfo(metadata ?: controller.metadata)
-                    val parsed = nativePayload?.let { LyricPayload.inspect(it, currentTrack.title, false, currentTrack.artist) }
-                    val nativeTimeline = parsed?.timeline
+                val mode = settings.lyricSourceMode
+                if (mode == shop.terramoor.github.io.settings.LyricSourceMode.EXTERNAL_ONLY ||
+                    mode == shop.terramoor.github.io.settings.LyricSourceMode.AUTO) {
+                    val nativePayload = resolveNativePayload()
+                    val parsedPair = nativePayload?.let { parsePlayerPayload(it, currentTrack, isTrackChanged = false, trackDurationMs = duration) }
+                    val nativeTimeline = parsedPair?.first?.timeline
                     if (nativeTimeline != null) {
-                        raw = nativePayload
+                        val (effectivePayload, trueWords) = parsedPair.second
+                        lastTrackPayload = nativePayload
+                        raw = effectivePayload
                         timeline = nativeTimeline
+                        currentLyricSource = "player"
+                        isTrueWordSync = trueWords
                         reportNowPlayingNow(
                             title = currentTrack.title.orEmpty(),
                             artist = currentTrack.artist.orEmpty(),
                             source = "player",
-                            wordTimed = nativeTimeline.lines.any { it.words.isNotEmpty() },
+                            wordTimed = trueWords,
                             artwork = aodArtwork(),
+                            timeline = nativeTimeline,
                         )
                         requestOnlineTranslation(nativeTimeline, trackSequence)
-                    } else {
+                        render()
+                        return
+                    }
+                    if (mode == shop.terramoor.github.io.settings.LyricSourceMode.EXTERNAL_ONLY) {
                         reportNowPlayingNow(
                             title = currentTrack.title.orEmpty(),
                             artist = currentTrack.artist.orEmpty(),
@@ -1500,17 +1635,18 @@ internal class CapsuleRuntime(
                             wordTimed = false,
                             artwork = aodArtwork(),
                         )
+                        render()
+                        return
                     }
-                } else {
-                    reportNowPlayingNow(
-                        title = currentTrack.title.orEmpty(),
-                        artist = currentTrack.artist.orEmpty(),
-                        source = "",
-                        wordTimed = false,
-                        artwork = aodArtwork(),
-                    )
-                    scheduleOnlineFallback(currentTrack, trackSequence, duration)
                 }
+                reportNowPlayingNow(
+                    title = currentTrack.title.orEmpty(),
+                    artist = currentTrack.artist.orEmpty(),
+                    source = "",
+                    wordTimed = false,
+                    artwork = aodArtwork(),
+                )
+                scheduleOnlineFallback(currentTrack, trackSequence, duration, forceRefresh = forceRefresh)
                 render()
                 return
             }
@@ -1529,10 +1665,15 @@ internal class CapsuleRuntime(
             }
         }
 
-        private fun scheduleOnlineFallback(targetTrack: Track, seq: Long, trackDurationMs: Long) {
+        private fun scheduleOnlineFallback(
+            targetTrack: Track,
+            seq: Long,
+            trackDurationMs: Long,
+            forceRefresh: Boolean = false,
+        ) {
             val sourceMode = settings.lyricSourceMode
             if (sourceMode == shop.terramoor.github.io.settings.LyricSourceMode.EXTERNAL_ONLY) return
-            if (onlineFetchSeq == seq) return
+            if (!forceRefresh && onlineFetchSeq == seq) return
             val title = targetTrack.title?.trim()?.takeIf { it.isNotEmpty() } ?: return
             cancelOnlineFetch()
             val task = Runnable {
@@ -1548,6 +1689,7 @@ internal class CapsuleRuntime(
                     putString(LyricBridgeProvider.EXTRA_SOURCE_MODE, sourceMode.name)
                     putBoolean(LyricBridgeProvider.EXTRA_INTERPOLATE_WORDS, settings.interpolateWordLyrics)
                     putBoolean(LyricBridgeProvider.EXTRA_AUTO_CLEAR_CACHE, settings.autoClearCache)
+                    putBoolean(LyricBridgeProvider.EXTRA_FORCE_REFRESH, forceRefresh)
                 }
                 onlineExecutor.execute {
                     val reply = try {
@@ -1583,6 +1725,7 @@ internal class CapsuleRuntime(
                             source = source,
                             wordTimed = isTrueWordSync,
                             artwork = aodArtwork(),
+                            timeline = fetchedTimeline,
                         )
                         render()
                         requestOnlineTranslation(fetchedTimeline, seq)
@@ -1638,6 +1781,14 @@ internal class CapsuleRuntime(
                     val msg = "[lyrics] TRANSLATED(vi), lines=$count/${activeTimeline.lines.size}"
                     logLyrics(msg)
                     Log.i(TAG, msg)
+                    reportNowPlayingNow(
+                        title = track?.title.orEmpty(),
+                        artist = track?.artist.orEmpty(),
+                        source = currentLyricSource,
+                        wordTimed = isTrueWordSync,
+                        artwork = aodArtwork(),
+                        timeline = enriched,
+                    )
                     render()
                 }
             }
@@ -1694,7 +1845,11 @@ internal class CapsuleRuntime(
             }
         }
 
-        fun playbackClock(): PlaybackClock = playback.clock(duration)
+        fun playbackClock(): PlaybackClock {
+            val base = playback.clock(duration)
+            return if (lyricOffsetMs == 0L) base
+            else base.copy(basePositionMs = (base.basePositionMs + lyricOffsetMs).coerceAtLeast(0L))
+        }
 
         fun aodSongTitle(): String? = track?.title?.trim()?.takeIf { it.isNotEmpty() }
 
@@ -1752,29 +1907,43 @@ internal class CapsuleRuntime(
                 timeline = null
                 currentLyricSource = ""
                 isTrueWordSync = false
+                lyricOffsetMs = 0L
+                offsetInitializedForTrack = false
             }
+            val nextDuration = data.getLong(MediaMetadata.METADATA_KEY_DURATION).takeIf { it > 0L }
+                ?: if (changed) 0L else duration
+            val allowPlayerSource = settings.lyricSourceMode == shop.terramoor.github.io.settings.LyricSourceMode.AUTO ||
+                settings.lyricSourceMode == shop.terramoor.github.io.settings.LyricSourceMode.EXTERNAL_ONLY
             when {
                 nextPayload == null || nextPayload == previousTrackPayload -> {
                     logLyrics(if (nextPayload == null) "No lyricInfo in metadata" else "Waiting for new track lyricInfo")
-                    markMetadataMissing()
+                    if (changed || timeline == null) markMetadataMissing()
+                }
+                !allowPlayerSource -> {
+                    // Cache valid player payload in case user switches back to Trình phát / Tự động later.
+                    if (lastTrackPayload != nextPayload) {
+                        val check = LyricPayload.inspect(nextPayload, nextTrack.title, trackChanged, nextTrack.artist)
+                        if (check.timeline != null) lastTrackPayload = nextPayload
+                    }
                 }
                 else -> {
                     cancelMetadataExpiry()
-                    if (raw != nextPayload) {
+                    if (lastTrackPayload != nextPayload || timeline == null) {
                         lastLoggedLine = null
-                        raw = nextPayload
-                        val parsed = LyricPayload.inspect(nextPayload, nextTrack.title, trackChanged, nextTrack.artist)
+                        val (parsed, meta) = parsePlayerPayload(nextPayload, nextTrack, trackChanged, nextDuration)
+                        val (effectivePayload, trueWords) = meta
+                        raw = effectivePayload
                         timeline = parsed.timeline
                         val lines = timeline?.lines
                         if (lines != null) {
                             lastTrackPayload = nextPayload
                             currentLyricSource = "player"
-                            isTrueWordSync = lines.any { it.words.isNotEmpty() }
+                            isTrueWordSync = trueWords
                         }
                         val outcome = if (lines == null) {
                             "[lyrics] ${parsed.outcome}, chars=${nextPayload.length}, LRC=${parsed.hasLrc}, TTML=${parsed.hasTtml}"
                         } else {
-                            "[lyrics] PARSED, chars=${nextPayload.length}, lines=${lines.size}, translated=${lines.count { !it.translation.isNullOrBlank() }}, LRC=${parsed.hasLrc}, TTML=${parsed.hasTtml}"
+                            "[lyrics] PARSED(player), chars=${nextPayload.length}, lines=${lines.size}, wordLines=${lines.count { it.words.isNotEmpty() }}, trueWord=$trueWords, translated=${lines.count { !it.translation.isNullOrBlank() }}, LRC=${parsed.hasLrc}, TTML=${parsed.hasTtml}"
                         }
                         logLyrics(outcome)
                     }
@@ -1783,8 +1952,7 @@ internal class CapsuleRuntime(
             metadata = data
             track = nextTrack
             trackInfoAvailable = true
-            duration = data.getLong(MediaMetadata.METADATA_KEY_DURATION).takeIf { it > 0L }
-                ?: if (changed) 0L else duration
+            duration = nextDuration
             val currentTimeline = timeline
             reportNowPlayingNow(
                 title = nextTrack.title.orEmpty(),
@@ -1792,6 +1960,7 @@ internal class CapsuleRuntime(
                 source = if (currentTimeline != null) currentLyricSource else "",
                 wordTimed = currentTimeline != null && isTrueWordSync,
                 artwork = aodArtwork(),
+                timeline = currentTimeline,
             )
             if (currentTimeline == null) {
                 scheduleOnlineFallback(nextTrack, trackSequence, duration)

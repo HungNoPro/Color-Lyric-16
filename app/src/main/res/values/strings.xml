@@ -82,9 +82,15 @@
     <string name="lyrics_page_title">Lyrics &amp; sources</string>
     <string name="section_now_playing">Now playing</string>
     <string name="now_playing_idle">Waiting for music</string>
-    <string name="now_playing_source_player">Player</string>
+    <string name="now_playing_source_player">Player / Module</string>
     <string name="now_playing_source_none">No lyrics</string>
     <string name="now_playing_word_timed">Word</string>
+    <string name="now_playing_refresh_lyrics">Refresh lyrics for this track</string>
+    <string name="now_playing_refreshing_toast">Refreshing lyrics for current track…</string>
+    <string name="now_playing_offset_label">Lyric offset</string>
+    <string name="now_playing_view_full">Lyrics ›</string>
+    <string name="full_lyrics_empty">No lyrics available yet</string>
+    <string name="full_lyrics_close">Close</string>
     <string name="interpolate_word_lyrics">Interpolate word timing</string>
     <string name="interpolate_word_lyrics_summary">Estimate word cadence from syllables and vocal energy when the source has line-only lyrics (uses extra CPU)</string>
     <string name="section_lockscreen_aod">Lock screen &amp; AOD</string>
@@ -192,7 +198,7 @@
     <string name="source_lrclib" translatable="false">LRCLIB</string>
     <string name="source_kugou" translatable="false">Kugou</string>
     <string name="source_lyrics_ovh" translatable="false">lyrics.ovh</string>
-    <string name="source_external_only">System / player only</string>
+    <string name="source_external_only">Player / External module</string>
     <string name="auto_translate_vi">Auto-translate lyrics</string>
     <string name="auto_translate_vi_summary">Translate foreign lyrics for the second line</string>
     <string name="translate_target_lang">Translation language</string>

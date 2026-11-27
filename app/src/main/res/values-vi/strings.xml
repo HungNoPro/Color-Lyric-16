@@ -78,9 +78,15 @@
     <string name="lyrics_page_title">Lời bài hát &amp; nguồn</string>
     <string name="section_now_playing">Đang phát</string>
     <string name="now_playing_idle">Đang chờ phát nhạc</string>
-    <string name="now_playing_source_player">Trình phát</string>
+    <string name="now_playing_source_player">Trình phát / Module</string>
     <string name="now_playing_source_none">Chưa có lời</string>
     <string name="now_playing_word_timed">Từng chữ</string>
+    <string name="now_playing_refresh_lyrics">Tải lại lời bài này</string>
+    <string name="now_playing_refreshing_toast">Đang tải lại lời cho bài hiện tại…</string>
+    <string name="now_playing_offset_label">Độ lệch lời</string>
+    <string name="now_playing_view_full">Xem lời ›</string>
+    <string name="full_lyrics_empty">Chưa có dữ liệu lời bài hát</string>
+    <string name="full_lyrics_close">Đóng</string>
     <string name="section_lockscreen_aod">Màn hình khóa &amp; AOD</string>
     <string name="section_lyrics_source">Nguồn lời &amp; dịch thuật</string>
     <string name="section_lyrics_players">Trình phát</string>
@@ -177,7 +183,7 @@
     <string name="interpolate_word_lyrics">Nội suy lời từng chữ</string>
     <string name="interpolate_word_lyrics_summary">Ước lượng nhịp từng chữ theo âm tiết và năng lượng giọng hát khi nguồn không có karaoke từng từ (tốn thêm chút CPU)</string>
     <string name="source_auto">Tự động (Ưu tiên từng từ)</string>
-    <string name="source_external_only">Chỉ dùng nguồn từ trình phát</string>
+    <string name="source_external_only">Trình phát / Module mở rộng</string>
     <string name="auto_translate_vi">Tự động dịch lời bài hát</string>
     <string name="auto_translate_vi_summary">Tự dịch lời nhạc nước ngoài cho dòng thứ hai</string>
     <string name="translate_target_lang">Ngôn ngữ dịch</string>
